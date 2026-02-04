@@ -1,6 +1,0 @@
-INFO [snap_coin::full_node] Logger initialized for node at "./pool-node"
-INFO [snap_coin::full_node::ibd] Starting initial block download
-INFO [snap_coin::full_node::ibd] [SYNC] Fetched 1 block hashes
-INFO [snap_coin::full_node::ibd] [IBD] 100.00% | 1/1 |     1.39 blk/s | left=0 | ETA=0s | bottleneck=apply
-INFO [snap_coin::full_node::ibd] [SYNC] Blockchain synced successfully
-INFO [snap_coin::full_node] New block accepted: tk6ps46b3mfnlow2d9rhiid85qcd37v3otvzus1gl0snivr6

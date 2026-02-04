@@ -1,4 +1,0 @@
-INFO [snap_coin::full_node] Logger initialized for node at "./pool-node"
-INFO [snap_coin::full_node::ibd] Starting initial block download
-INFO [snap_coin::full_node::ibd] [SYNC] Already synced
-INFO [snap_coin::full_node] New block accepted: i6yj73ir5fjuoaak7nmkg1jbpylff6d1504dr73i1x0oesga
