@@ -1,0 +1,33 @@
+INFO [snap_coin::full_node] Logger initialized for node at "./pool-node"
+INFO [snap_coin::full_node::ibd] Starting initial block download
+INFO [snap_coin::full_node::ibd] [SYNC] Already synced
+INFO [snap_coin::full_node] New block accepted: 46hxi0q9cj3zu6oynk4gyndqz3gnm6sttvkc8sghcxxxomvk
+INFO [snap_coin::full_node] New block accepted: krbvab5tpq22ase61rta3dlers4d7p1r7xqo4gct6m9e1ksy
+INFO [snap_coin::full_node] New block accepted: dffezpw527lz0d8enlqpzam83htfiolfevb2vgh7jtlwdmy7
+INFO [snap_coin::full_node] New block accepted: 2d3lo9t9nd5ywbczh6toij5ssxytnc4q6bw8snwlti35e2n4
+INFO [snap_coin::full_node] New block accepted: 9eun2slr0arp1jvuvhjih02anxabie0jq2sakmxh11dgapgu
+INFO [snap_coin::full_node] New block accepted: 7mm4h74yrdhd3lje24e4ouliyxx852wsr8ajjdhlpl2c8me
+INFO [snap_coin::full_node] New block accepted: g18wjad160g8fra43j9qo3ief45p9vqs2ctp3oqw1e28rfyz
+INFO [snap_coin::full_node] New block accepted: 3lvi142zxecxc1venhr7vjhsn4a8sl3vcry4qq6lx07bj75v
+INFO [snap_coin::full_node] New block accepted: 7xrkazg5v8onoj5vom8w83hpha6wk34q3k9r48n4r0cfsawy
+INFO [snap_coin::full_node] New block accepted: ewo3a7k86fjl9r5vv1jdq5r38v9kyeubn4fabrdbhmq6vgfn
+INFO [snap_coin::full_node] New block accepted: m45oba1ql18babh0mbwwxc57drfw17bb1husbgxfehf6sy11
+INFO [snap_coin::full_node] New block accepted: 6ry17arq3avw4vdqxxetenufsch6bvhwsj55utlramne8cyp
+INFO [snap_coin::full_node] New block accepted: kzx0uf4onar9tksnu4i4rqp90e5k0hfmh42v2gwcrrsrp611
+INFO [snap_coin::full_node] New block accepted: qcv9x3y2rbjt7j8n2iis30guk3bqatxf7uv4wvpzaheawn4e
+INFO [snap_coin::full_node] New block accepted: mg0l33vcjlooo2496mawvfl8a40ntspei2yimvuh5r38319r
+INFO [snap_coin::full_node] New block accepted: 9cez0yjzad7oa653r7fxi32tmaryjifzwpj07il7n7zzhd37
+INFO [snap_coin::full_node] New block accepted: ri71jr098owms8z9udoutpkw9d3crlp5t0ar5tnlp5eguno5
+INFO [snap_coin::full_node] New block accepted: kkeb29m9nm7sgtdvfslqcqxf3g4mq2hcacs1uod0e4sdqhcy
+INFO [snap_coin::full_node] New block accepted: vgnr9kffknrm591ddqwm3tki3t42m74cbwkay26wwuzc0859
+INFO [snap_coin::full_node] New block accepted: 1pjhssq2lw1eu2zepidh26k3d2gsu3729iwdzn19tqk44j02
+INFO [snap_coin::full_node] New block accepted: oeseph49uhmzzw927zy7cjnyhhr1rci5tpwtyfmvjq8tb7vs
+INFO [snap_coin::full_node] New block accepted: 9o48o0pn5imzdnd1ax2fgxzst3rfl1fz9hg6arvwyv7iz4no
+INFO [snap_coin::full_node] New block accepted: evyz0n03qk3mm7nr1nn8vh418ycc0g0cv2omazt1eowfgu6n
+INFO [snap_coin::full_node] New block accepted: m00ynl9uwd6kjx541c4dx32pbuhrq1fhnr7v4xf6dx8wu821
+INFO [snap_coin::full_node] New block accepted: ppvu1bkxvollcozub0ny5oa96koy7oz802buy34ammy8tpbx
+INFO [snap_coin::full_node] New block accepted: iynyl7b4t00ss4d8hhxzj6es7gd61lmzi80oubgxpgc848mu
+INFO [snap_coin::full_node] New block accepted: 3ne5kpji4tcuesql367rgu5kvqhku5qfvfjso40ujhxx5wjl
+INFO [snap_coin::full_node] New block accepted: 8u1mzu0q0n9dp4kmufp3hgcg9qs1h47w83caeva9ki6afghw
+INFO [snap_coin::full_node] New block accepted: a6my2r2sytfyu3wbryjoz1o5pgxzq99o26a60x9jmjaynkft
+ERROR [snap_coin::node::peer] Peer error (disconnected): Message decoding error: Failed to write or read to / from stream

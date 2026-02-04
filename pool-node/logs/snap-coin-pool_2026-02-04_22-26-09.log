@@ -1,0 +1,11 @@
+INFO [snap_coin::full_node] Logger initialized for node at "./pool-node"
+INFO [snap_coin::full_node::ibd] Starting initial block download
+INFO [snap_coin::full_node::ibd] [SYNC] Already synced
+INFO [snap_coin::full_node] New block accepted: hrioif0cy3ete8cs6r01hzuhjtwn85yfff5yl9zun40hvq48
+INFO [snap_coin::full_node] New block accepted: llyu1akih13i8652a7w5fwf8xy3fv9pogpcq5sbwo7nevnuo
+INFO [snap_coin::full_node] New block accepted: oaztftozfrru5bqqcacjc4ggo3ni0u3kvazqegl81z0gi1qh
+INFO [snap_coin::full_node] New block accepted: 799lemcni8ofhvgk6ayhh6389m35kpeh6494vq9h4rye0k15
+INFO [snap_coin::full_node] New block accepted: wf722tzw2w7jxdh9s9axuf3iix31zd97x22kwurpdybz7lf
+INFO [snap_coin::full_node] New block accepted: odc2rmpve4lrdk7nqul1asp0m00rlnoirprb9fujeo0hbnqa
+INFO [snap_coin::full_node] New block accepted: 4ioqi30ysydrfufqlcquvjdp30jd8jgjvhkzocy0b1muzgqt
+INFO [snap_coin::full_node] New block accepted: 7qyx6rp4gpz8hqeev06mmjc6mihqt93nrycqmepg5bowkmko

@@ -1,0 +1,18 @@
+INFO [snap_coin::full_node] Logger initialized for node at "./pool-node"
+INFO [snap_coin::full_node::ibd] Starting initial block download
+INFO [snap_coin::full_node::ibd] [SYNC] Fetched 1 block hashes
+INFO [snap_coin::full_node::ibd] [IBD] 100.00% | 1/1 |     1.18 blk/s | left=0 | ETA=0s | bottleneck=apply
+INFO [snap_coin::full_node::ibd] [SYNC] Blockchain synced successfully
+INFO [snap_coin::full_node] New block accepted: fhjo42x86lqqawufo2yisih3l6f4mb15vu7letf745r07syp
+INFO [snap_coin::full_node] New block accepted: hae90x95lb40by2m0rke7ck4o7ufd1hniw82f54h94b0l8zd
+INFO [snap_coin::full_node] New block accepted: 5bzgp3rri3zowzb3x70g15whja7q3qemreturivxqulmw1ul
+INFO [snap_coin::full_node] New block accepted: 86su61h3vrd4e6bdbgjzye6lewvvm7xgr9e6cwce2iti0z45
+INFO [snap_coin::full_node] New block accepted: 5567yrpa8lkmehoo33811mmgx17ujxa8vc9zl08w7sdilyw6
+INFO [snap_coin::full_node] New block accepted: 6ehklmiigk5rkxp1ibqr4t89tdqcopgnwp2ygysfcacisv0t
+INFO [snap_coin::full_node] New block accepted: 4sn5mgcy3xq84af63xqyq6174zr9omtk2b5r9d4784k45hq0
+INFO [snap_coin::full_node] New block accepted: 4pgyi7hsj5d8t73i9vgg57jsk7a0uyej1x1hwlh7bzl0nknf
+INFO [snap_coin::full_node] New block accepted: 8f9n25zr8hiubps4e8ntsvjrrli5a3j44is1wfq9rksgq2a8
+INFO [snap_coin::full_node] New block accepted: 34s5wdc9kcyw06mtqpwksfsjxjy4ryximmjqcbpyu7ujik7i
+INFO [snap_coin::full_node] New block accepted: 1fm1zo4xn0in0kg5bd7m2dx06exhis9bnknwek61gwl43we1
+INFO [snap_coin::full_node] New block accepted: 31h0bw45pcielut9iqpb6pet71p9mgkgq4eqlm1d512jhewf
+INFO [snap_coin::full_node] New block accepted: 3n9sa3b0aert9sgvbjvu2d7djyft7j5kshw29rwc0dpwzzbn
