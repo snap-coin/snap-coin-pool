@@ -1,6 +1,5 @@
-use std::{collections::HashMap, sync::Arc};
-
 use snap_coin::crypto::keys::Public;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
 pub type SharedShareStore = Arc<ShareStore>;
@@ -20,8 +19,11 @@ impl ShareStore {
         *self.shares.write().await.entry(miner).or_insert(0) += 1;
     }
 
-    pub async fn clear_shares(&self) {
-        self.shares.write().await.clear();
+    pub async fn clear_shares_for(&self, miners: &[Public]) {
+        let mut shares = self.shares.write().await;
+        for miner in miners {
+            shares.remove(miner);
+        }
     }
 
     pub async fn get_shares(&self) -> HashMap<Public, u64> {
