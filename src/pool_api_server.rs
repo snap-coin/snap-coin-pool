@@ -88,7 +88,7 @@ impl PoolServer {
         if entry.score >= BAN_THRESHOLD && !entry.banned {
             entry.score += BAN_PENALTY;
             entry.banned = true;
-            println!("⛔ IP {} has been BANNED (score: {})", ip, entry.score);
+            println!("IP {} has been BANNED (score: {})", ip, entry.score);
         }
     }
 
@@ -111,7 +111,7 @@ impl PoolServer {
                 // Unban if score drops below threshold
                 if entry.banned && entry.score < BAN_THRESHOLD {
                     entry.banned = false;
-                    println!("✓ IP {} has been unbanned (score: {})", ip, entry.score);
+                    println!("IP {} has been unbanned (score: {})", ip, entry.score);
                 }
 
                 // Remove entry if score is 0 and not banned
@@ -130,6 +130,7 @@ impl PoolServer {
         loop {
             if let Err(e) = async {
                 let request = Request::decode_from_stream(&mut stream).await?;
+                println!("Got request {}", ip);
                 let response = match request {
                     Request::Height => Response::Height {
                         height: self.blockchain.block_store().get_height() as u64,
@@ -264,6 +265,7 @@ impl PoolServer {
                 };
                 let response_buf = response.encode()?;
 
+                println!("Sending response {}", ip);
                 stream.write_all(&response_buf).await?;
 
                 Ok::<(), anyhow::Error>(())
@@ -306,7 +308,6 @@ impl PoolServer {
                     tokio::spawn(async move {
                         // Check if IP is banned
                         if server.is_banned(&ip).await {
-                            println!("⛔ Blocked connection from banned IP: {}", ip);
                             let _ = stream.shutdown().await;
                             return;
                         }
