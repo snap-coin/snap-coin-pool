@@ -260,7 +260,7 @@ impl PoolServer {
                         }
 
                         // Stop request response task
-                        return Ok(());
+                        return Err(anyhow!("Request response loop ended"));
                     }
                 };
                 let response_buf = response.encode()?;
