@@ -1,7 +1,10 @@
-use snap_coin::{
-    core::{block::Block, blockchain::BlockchainError}, crypto::keys::Public, economics::{DEV_WALLET, calculate_dev_fee, get_block_reward}, full_node::{SharedBlockchain, node_state::SharedNodeState}
-};
 use num_bigint::BigUint;
+use snap_coin::{
+    core::{block::Block, blockchain::BlockchainError},
+    crypto::keys::Public,
+    economics::{DEV_WALLET, calculate_dev_fee, get_block_reward},
+    full_node::{SharedBlockchain, node_state::SharedNodeState},
+};
 
 use crate::share_store::SharedShareStore;
 
@@ -14,12 +17,21 @@ pub async fn handle_share(
     pool_public: Public,
     share_store: &SharedShareStore,
 ) -> Result<(), BlockchainError> {
+    println!("New share!");
     block.check_completeness()?;
-    if block.meta.block_pow_difficulty != blockchain.get_block_difficulty() || block.meta.tx_pow_difficulty != blockchain.get_transaction_difficulty() {
-        return Err(BlockchainError::Block(snap_coin::core::block::BlockError::DifficultyMismatch))
+    if block.meta.block_pow_difficulty != blockchain.get_block_difficulty()
+        || block.meta.tx_pow_difficulty != blockchain.get_transaction_difficulty()
+    {
+        return Err(BlockchainError::Block(
+            snap_coin::core::block::BlockError::DifficultyMismatch,
+        ));
     }
-    if BigUint::from_bytes_be(&block.meta.hash.unwrap().dump_buf()) > BigUint::from_bytes_be(pool_difficulty) {
-        return Err(BlockchainError::Block(snap_coin::core::block::BlockError::BlockPowDifficultyIncorrect))
+    if BigUint::from_bytes_be(&block.meta.hash.unwrap().dump_buf())
+        > BigUint::from_bytes_be(pool_difficulty)
+    {
+        return Err(BlockchainError::Block(
+            snap_coin::core::block::BlockError::BlockPowDifficultyIncorrect,
+        ));
     }
     block.check_meta()?;
 
