@@ -5,11 +5,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
 
 use snap_coin::{
     api::requests::{Request, Response},
@@ -25,40 +21,6 @@ use crate::{
 
 pub const PAGE_SIZE: u32 = 200;
 
-// ---------------- RATE LIMITER ----------------
-
-#[derive(Clone)]
-pub struct RateLimiter {
-    limits: Arc<tokio::sync::Mutex<HashMap<Public, (u32, Instant)>>>,
-    max_per_sec: u32,
-}
-
-impl RateLimiter {
-    pub fn new(max_per_sec: u32) -> Self {
-        Self {
-            limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            max_per_sec,
-        }
-    }
-
-    pub async fn allow(&self, key: &Public) -> bool {
-        let mut map = self.limits.lock().await;
-        let now = Instant::now();
-
-        let entry = map.entry(key.clone()).or_insert((0, now));
-
-        if now.duration_since(entry.1) > Duration::from_secs(1) {
-            entry.0 = 0;
-            entry.1 = now;
-        }
-
-        entry.0 += 1;
-        entry.0 <= self.max_per_sec
-    }
-}
-
-// ---------------- SERVER ----------------
-
 /// Server for hosting a Snap Coin API
 pub struct PoolServer {
     port: u16,
@@ -69,9 +31,6 @@ pub struct PoolServer {
     pool_dev: Public,
     pool_fee: f64,
     share_store: SharedShareStore,
-
-    // ✅ added
-    rate_limiter: RateLimiter,
 }
 
 impl PoolServer {
@@ -95,22 +54,13 @@ impl PoolServer {
             pool_dev,
             pool_fee,
             share_store,
-
-            // ✅ added
-            rate_limiter: RateLimiter::new(25),
         }
     }
 
     /// Handle a incoming connection
     async fn connection(self: Arc<Self>, mut stream: TcpStream, client_address: Public) {
-        println!("New miner connected!");
         loop {
             if let Err(e) = async {
-                // ✅ ONLY CHANGE: rate limit check
-                if !self.rate_limiter.allow(&client_address).await {
-                    return Err(anyhow!("Rate limit exceeded"));
-                }
-
                 let request = Request::decode_from_stream(&mut stream).await?;
                 let response = match request {
                     Request::Height => Response::Height {
@@ -147,7 +97,6 @@ impl PoolServer {
                     Request::Mempool {
                         page: requested_page,
                     } => {
-                        println!("rx: mempool");
                         let mempool = self.node_state.mempool.get_mempool().await;
                         let page = slice_vec(
                             &mempool,
@@ -167,7 +116,6 @@ impl PoolServer {
                     }
                     Request::NewBlock { new_block } => Response::NewBlock {
                         status: {
-                            println!("rx: block");
                             let res = handle_share(
                                 &self.blockchain,
                                 &self.node_state,
@@ -216,27 +164,22 @@ impl PoolServer {
                     Request::NewTransaction { .. } => {
                         return Err(anyhow!("Restricted API endpoint accessed"));
                     }
-                    Request::Difficulty => {
-                        println!("rx: diff");
-                        Response::Difficulty {
+                    Request::Difficulty => Response::Difficulty {
                         transaction_difficulty: self.blockchain.get_transaction_difficulty(),
                         block_difficulty: self.blockchain.get_block_difficulty(),
-                    }},
+                    },
                     Request::BlockHeight { hash } => Response::BlockHeight {
                         height: self.blockchain.block_store().get_block_height_by_hash(hash),
                     },
-                    Request::LiveTransactionDifficulty => {
-                        println!("rx: live diff");
-                        Response::LiveTransactionDifficulty {
+                    Request::LiveTransactionDifficulty => Response::LiveTransactionDifficulty {
                         live_difficulty: calculate_live_transaction_difficulty(
                             &self.blockchain.get_transaction_difficulty(),
                             self.node_state.mempool.mempool_size().await,
                         ),
-                    }
                     },
                     Request::SubscribeToChainEvents => {
-                        println!("rx: subscribe");
                         let mut rx = self.node_state.chain_events.subscribe();
+                        // Start event stream task
                         loop {
                             match rx.recv().await {
                                 Ok(event) => {
@@ -247,6 +190,7 @@ impl PoolServer {
                             }
                         }
 
+                        // Stop request response task
                         return Ok(());
                     }
                 };
@@ -279,21 +223,27 @@ impl PoolServer {
 
         Ok(tokio::spawn(async move {
             loop {
+                let server = server.clone();
                 if let Err(e) = async {
                     let (mut stream, _) = listener.accept().await?;
 
-                    let mut client_public = [0u8; 32];
-                    stream.read_exact(&mut client_public).await?;
-                    stream.write_all(&server.pool_difficulty).await?;
-                    stream
-                        .write_all(server.pool_private.to_public().dump_buf())
-                        .await?;
-
-                    let client_public = Public::new_from_buf(&client_public);
-
-                    let server_clone = server.clone();
                     tokio::spawn(async move {
-                        server_clone.connection(stream, client_public).await;
+                        if let Err(e) = async move {
+                            let mut client_public = [0u8; 32];
+                            stream.read_exact(&mut client_public).await?;
+                            stream.write_all(&server.pool_difficulty).await?;
+                            stream
+                                .write_all(server.pool_private.to_public().dump_buf())
+                                .await?;
+
+                            let client_public = Public::new_from_buf(&client_public);
+                            server.connection(stream, client_public).await;
+                            Ok::<(), anyhow::Error>(())
+                        }
+                        .await
+                        {
+                            println!("Handshake failed! {}", e);
+                        }
                     });
 
                     Ok::<(), anyhow::Error>(())
