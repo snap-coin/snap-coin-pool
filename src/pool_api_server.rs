@@ -6,7 +6,9 @@ use tokio::{
     time::timeout,
 };
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+
+use tokio::sync::Mutex;
 
 use snap_coin::{
     api::requests::{Request, Response},
@@ -21,6 +23,19 @@ use crate::{
 };
 
 pub const PAGE_SIZE: u32 = 200;
+const ERROR_PENALTY: i32 = 5;
+const BAN_THRESHOLD: i32 = 25;
+const BAN_PENALTY: i32 = 10;
+const SCORE_DECAY_INTERVAL: Duration = Duration::from_secs(30);
+const SCORE_DECAY_AMOUNT: i32 = 1;
+
+#[derive(Clone)]
+struct IpScore {
+    score: i32,
+    banned: bool,
+}
+
+type IpScoreMap = Arc<Mutex<HashMap<String, IpScore>>>;
 
 /// Server for hosting a Snap Coin API
 pub struct PoolServer {
@@ -32,6 +47,7 @@ pub struct PoolServer {
     pool_dev: Public,
     pool_fee: f64,
     share_store: SharedShareStore,
+    ip_scores: IpScoreMap,
 }
 
 impl PoolServer {
@@ -55,11 +71,62 @@ impl PoolServer {
             pool_dev,
             pool_fee,
             share_store,
+            ip_scores: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Add penalty to an IP address
+    async fn add_penalty(&self, ip: String) {
+        let mut scores = self.ip_scores.lock().await;
+        let entry = scores.entry(ip.clone()).or_insert(IpScore {
+            score: 0,
+            banned: false,
+        });
+
+        entry.score += ERROR_PENALTY;
+
+        if entry.score >= BAN_THRESHOLD && !entry.banned {
+            entry.score += BAN_PENALTY;
+            entry.banned = true;
+            println!("⛔ IP {} has been BANNED (score: {})", ip, entry.score);
+        }
+    }
+
+    /// Check if an IP is banned
+    async fn is_banned(&self, ip: &str) -> bool {
+        let scores = self.ip_scores.lock().await;
+        scores.get(ip).map(|entry| entry.banned).unwrap_or(false)
+    }
+
+    /// Periodically decay scores for all IPs
+    async fn score_decay_task(ip_scores: IpScoreMap) {
+        let mut interval = tokio::time::interval(SCORE_DECAY_INTERVAL);
+        loop {
+            interval.tick().await;
+            let mut scores = ip_scores.lock().await;
+
+            scores.retain(|ip, entry| {
+                entry.score = (entry.score - SCORE_DECAY_AMOUNT).max(0);
+
+                // Unban if score drops below threshold
+                if entry.banned && entry.score < BAN_THRESHOLD {
+                    entry.banned = false;
+                    println!("✓ IP {} has been unbanned (score: {})", ip, entry.score);
+                }
+
+                // Remove entry if score is 0 and not banned
+                entry.score > 0 || entry.banned
+            });
         }
     }
 
     /// Handle a incoming connection
-    async fn connection(self: Arc<Self>, mut stream: TcpStream, client_address: Public) {
+    async fn connection(
+        self: Arc<Self>,
+        mut stream: TcpStream,
+        client_address: Public,
+        ip: String,
+    ) {
         loop {
             if let Err(e) = async {
                 let request = Request::decode_from_stream(&mut stream).await?;
@@ -203,7 +270,8 @@ impl PoolServer {
             }
             .await
             {
-                println!("API client error: {}", e);
+                println!("API client error from {}: {}", ip, e);
+                self.add_penalty(ip.clone()).await;
                 break;
             }
         }
@@ -220,35 +288,55 @@ impl PoolServer {
             listener.local_addr()?.port()
         );
 
+        // Start score decay task
+        let ip_scores_clone = self.ip_scores.clone();
+        tokio::spawn(async move {
+            Self::score_decay_task(ip_scores_clone).await;
+        });
+
         let server = self.clone();
 
         Ok(tokio::spawn(async move {
             loop {
                 let server = server.clone();
                 if let Err(e) = async {
-                    let (mut stream, _) = listener.accept().await?;
+                    let (mut stream, addr) = listener.accept().await?;
+                    let ip = Self::extract_ip(&addr);
 
                     tokio::spawn(async move {
+                        // Check if IP is banned
+                        if server.is_banned(&ip).await {
+                            println!("⛔ Blocked connection from banned IP: {}", ip);
+                            let _ = stream.shutdown().await;
+                            return;
+                        }
+
+                        let server_clone = server.clone();
+                        let ip_clone = ip.clone();
                         match timeout(Duration::from_secs(1), async move {
                             let mut client_public = [0u8; 32];
                             stream.read_exact(&mut client_public).await?;
-                            stream.write_all(&server.pool_difficulty).await?;
+                            stream.write_all(&server_clone.pool_difficulty).await?;
                             stream
-                                .write_all(server.pool_private.to_public().dump_buf())
+                                .write_all(server_clone.pool_private.to_public().dump_buf())
                                 .await?;
 
                             let client_public = Public::new_from_buf(&client_public);
-                            server.connection(stream, client_public).await;
+                            server_clone
+                                .connection(stream, client_public, ip_clone.clone())
+                                .await;
                             Ok::<(), anyhow::Error>(())
                         })
                         .await
                         {
                             Err(_t) => {
-                                println!("Handshake failed, timeout")
+                                println!("Handshake failed from {}, timeout", ip);
+                                server.add_penalty(ip).await;
                             }
                             Ok(Ok(())) => {}
                             Ok(Err(e)) => {
-                                println!("Handshake failed, error: {}", e)
+                                println!("Handshake failed from {}, error: {}", ip, e);
+                                server.add_penalty(ip).await;
                             }
                         }
                     });
@@ -264,5 +352,10 @@ impl PoolServer {
             #[allow(unreachable_code)]
             ()
         }))
+    }
+
+    /// Extract IP address from SocketAddr
+    fn extract_ip(addr: &SocketAddr) -> String {
+        addr.ip().to_string()
     }
 }
