@@ -147,6 +147,7 @@ impl PoolServer {
                     Request::Mempool {
                         page: requested_page,
                     } => {
+                        println!("rx: mempool");
                         let mempool = self.node_state.mempool.get_mempool().await;
                         let page = slice_vec(
                             &mempool,
@@ -166,6 +167,7 @@ impl PoolServer {
                     }
                     Request::NewBlock { new_block } => Response::NewBlock {
                         status: {
+                            println!("rx: block");
                             let res = handle_share(
                                 &self.blockchain,
                                 &self.node_state,
@@ -214,20 +216,26 @@ impl PoolServer {
                     Request::NewTransaction { .. } => {
                         return Err(anyhow!("Restricted API endpoint accessed"));
                     }
-                    Request::Difficulty => Response::Difficulty {
+                    Request::Difficulty => {
+                        println!("rx: diff");
+                        Response::Difficulty {
                         transaction_difficulty: self.blockchain.get_transaction_difficulty(),
                         block_difficulty: self.blockchain.get_block_difficulty(),
-                    },
+                    }},
                     Request::BlockHeight { hash } => Response::BlockHeight {
                         height: self.blockchain.block_store().get_block_height_by_hash(hash),
                     },
-                    Request::LiveTransactionDifficulty => Response::LiveTransactionDifficulty {
+                    Request::LiveTransactionDifficulty => {
+                        println!("rx: live diff");
+                        Response::LiveTransactionDifficulty {
                         live_difficulty: calculate_live_transaction_difficulty(
                             &self.blockchain.get_transaction_difficulty(),
                             self.node_state.mempool.mempool_size().await,
                         ),
+                    }
                     },
                     Request::SubscribeToChainEvents => {
+                        println!("rx: subscribe");
                         let mut rx = self.node_state.chain_events.subscribe();
                         loop {
                             match rx.recv().await {

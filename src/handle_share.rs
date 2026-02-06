@@ -17,7 +17,6 @@ pub async fn handle_share(
     pool_public: Public,
     share_store: &SharedShareStore,
 ) -> Result<(), BlockchainError> {
-    println!("New share!");
     block.check_completeness()?;
     if block.meta.block_pow_difficulty != blockchain.get_block_difficulty()
         || block.meta.tx_pow_difficulty != blockchain.get_transaction_difficulty()
