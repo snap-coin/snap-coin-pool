@@ -5,7 +5,11 @@ use tokio::{
     task::JoinHandle,
 };
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use snap_coin::{
     api::requests::{Request, Response},
@@ -21,6 +25,40 @@ use crate::{
 
 pub const PAGE_SIZE: u32 = 200;
 
+// ---------------- RATE LIMITER ----------------
+
+#[derive(Clone)]
+pub struct RateLimiter {
+    limits: Arc<tokio::sync::Mutex<HashMap<Public, (u32, Instant)>>>,
+    max_per_sec: u32,
+}
+
+impl RateLimiter {
+    pub fn new(max_per_sec: u32) -> Self {
+        Self {
+            limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            max_per_sec,
+        }
+    }
+
+    pub async fn allow(&self, key: &Public) -> bool {
+        let mut map = self.limits.lock().await;
+        let now = Instant::now();
+
+        let entry = map.entry(key.clone()).or_insert((0, now));
+
+        if now.duration_since(entry.1) > Duration::from_secs(1) {
+            entry.0 = 0;
+            entry.1 = now;
+        }
+
+        entry.0 += 1;
+        entry.0 <= self.max_per_sec
+    }
+}
+
+// ---------------- SERVER ----------------
+
 /// Server for hosting a Snap Coin API
 pub struct PoolServer {
     port: u16,
@@ -31,6 +69,9 @@ pub struct PoolServer {
     pool_dev: Public,
     pool_fee: f64,
     share_store: SharedShareStore,
+
+    // ✅ added
+    rate_limiter: RateLimiter,
 }
 
 impl PoolServer {
@@ -54,6 +95,9 @@ impl PoolServer {
             pool_dev,
             pool_fee,
             share_store,
+
+            // ✅ added
+            rate_limiter: RateLimiter::new(25),
         }
     }
 
@@ -62,6 +106,11 @@ impl PoolServer {
         println!("New miner connected!");
         loop {
             if let Err(e) = async {
+                // ✅ ONLY CHANGE: rate limit check
+                if !self.rate_limiter.allow(&client_address).await {
+                    return Err(anyhow!("Rate limit exceeded"));
+                }
+
                 let request = Request::decode_from_stream(&mut stream).await?;
                 let response = match request {
                     Request::Height => Response::Height {
@@ -180,7 +229,6 @@ impl PoolServer {
                     },
                     Request::SubscribeToChainEvents => {
                         let mut rx = self.node_state.chain_events.subscribe();
-                        // Start event stream task
                         loop {
                             match rx.recv().await {
                                 Ok(event) => {
@@ -191,7 +239,6 @@ impl PoolServer {
                             }
                         }
 
-                        // Stop request response task
                         return Ok(());
                     }
                 };
