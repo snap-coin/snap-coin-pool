@@ -3,9 +3,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     task::JoinHandle,
+    time::timeout,
 };
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use snap_coin::{
     api::requests::{Request, Response},
@@ -228,7 +229,7 @@ impl PoolServer {
                     let (mut stream, _) = listener.accept().await?;
 
                     tokio::spawn(async move {
-                        if let Err(e) = async move {
+                        match timeout(Duration::from_secs(1), async move {
                             let mut client_public = [0u8; 32];
                             stream.read_exact(&mut client_public).await?;
                             stream.write_all(&server.pool_difficulty).await?;
@@ -239,10 +240,16 @@ impl PoolServer {
                             let client_public = Public::new_from_buf(&client_public);
                             server.connection(stream, client_public).await;
                             Ok::<(), anyhow::Error>(())
-                        }
+                        })
                         .await
                         {
-                            println!("Handshake failed! {}", e);
+                            Err(_t) => {
+                                println!("Handshake failed, timeout")
+                            }
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                println!("Handshake failed, error: {}", e)
+                            }
                         }
                     });
 
