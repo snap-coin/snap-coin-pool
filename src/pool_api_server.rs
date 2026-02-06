@@ -59,6 +59,7 @@ impl PoolServer {
 
     /// Handle a incoming connection
     async fn connection(self: Arc<Self>, mut stream: TcpStream, client_address: Public) {
+        println!("New miner connected!");
         loop {
             if let Err(e) = async {
                 let request = Request::decode_from_stream(&mut stream).await?;
