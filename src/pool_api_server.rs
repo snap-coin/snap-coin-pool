@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::{RwLock, mpsc},
     task::JoinHandle,
     time::timeout,
 };
@@ -11,19 +12,21 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 use snap_coin::{
-    api::requests::{Request, Response},
-    core::{difficulty::calculate_live_transaction_difficulty, utils::slice_vec},
+    api::{
+        client::Client,
+        requests::{Request, Response},
+    },
+    core::block::Block,
     crypto::keys::{Private, Public},
-    economics::get_block_reward,
-    full_node::{SharedBlockchain, accept_block, node_state::SharedNodeState},
+    full_node::node_state::ChainEvent,
 };
 
 use crate::{
-    handle_block::handle_block, handle_share::handle_share, share_store::SharedShareStore,
+    handle_rewards::handle_rewards, handle_share::handle_share, job_handler::JobHandler,
+    share_store::SharedShareStore,
 };
 
-pub const PAGE_SIZE: u32 = 200;
-const ERROR_PENALTY: i32 = 5;
+const ERROR_PENALTY: i32 = 1;
 const BAN_THRESHOLD: i32 = 25;
 const BAN_PENALTY: i32 = 10;
 const SCORE_DECAY_INTERVAL: Duration = Duration::from_secs(30);
@@ -40,37 +43,36 @@ type IpScoreMap = Arc<Mutex<HashMap<String, IpScore>>>;
 /// Server for hosting a Snap Coin API
 pub struct PoolServer {
     port: u16,
-    blockchain: SharedBlockchain,
-    node_state: SharedNodeState,
     pool_difficulty: [u8; 32],
     pool_private: Private,
     pool_dev: Public,
     pool_fee: f64,
+    pool_api: SocketAddr,
     share_store: SharedShareStore,
     ip_scores: IpScoreMap,
+    current_job: Arc<RwLock<Option<Block>>>,
 }
 
 impl PoolServer {
     /// Create a new server, do not listen for connections yet
     pub fn new(
         port: u16,
-        blockchain: SharedBlockchain,
-        node_state: SharedNodeState,
         pool_difficulty: [u8; 32],
         pool_private: Private,
         pool_dev: Public,
         pool_fee: f64,
+        pool_api: SocketAddr,
         share_store: SharedShareStore,
     ) -> Self {
         PoolServer {
             port,
-            blockchain,
-            node_state,
             pool_difficulty,
             pool_private,
             pool_dev,
             pool_fee,
             share_store,
+            pool_api,
+            current_job: Arc::new(RwLock::new(None)),
             ip_scores: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -122,137 +124,63 @@ impl PoolServer {
 
     /// Handle a incoming connection
     async fn connection(
-        self: Arc<Self>,
+        self: Arc<PoolServer>,
         mut stream: TcpStream,
         client_address: Public,
         ip: String,
+        submit_block: mpsc::Sender<(Block, Public)>,
+        job_handler: Arc<JobHandler>,
     ) {
         loop {
             if let Err(e) = async {
                 let request = Request::decode_from_stream(&mut stream).await?;
-                println!("Got request {}", ip);
                 let response = match request {
-                    Request::Height => Response::Height {
-                        height: self.blockchain.block_store().get_height() as u64,
-                    },
-                    Request::Block { block_hash } => Response::Block {
-                        block: self.blockchain.block_store().get_block_by_hash(block_hash),
-                    },
-                    Request::BlockHash { height } => Response::BlockHash {
-                        hash: self
-                            .blockchain
-                            .block_store()
-                            .get_block_hash_by_height(height as usize),
-                    },
-                    Request::Transaction { .. } => {
-                        return Err(anyhow!("Restricted API endpoint accessed"));
-                    }
-                    Request::TransactionAndInfo { .. } => {
-                        return Err(anyhow!("Restricted API endpoint accessed"));
-                    }
-                    Request::TransactionsOfAddress { .. } => {
-                        return Err(anyhow!("Restricted API endpoint accessed"));
-                    }
-                    Request::AvailableUTXOs { .. } => {
-                        return Err(anyhow!("Restricted API endpoint accessed"));
-                    }
-                    Request::Balance { .. } => {
-                        return Err(anyhow!("Restricted API endpoint accessed"));
-                    }
-                    Request::Reward => Response::Reward {
-                        reward: get_block_reward(self.blockchain.block_store().get_height()),
-                    },
-                    Request::Peers => return Err(anyhow!("Restricted API endpoint accessed")),
-                    Request::Mempool {
-                        page: requested_page,
-                    } => {
-                        let mempool = self.node_state.mempool.get_mempool().await;
-                        let page = slice_vec(
-                            &mempool,
-                            (requested_page * PAGE_SIZE) as usize,
-                            ((requested_page + 1) * PAGE_SIZE) as usize,
-                        );
-                        let next_page = if page.len() != PAGE_SIZE as usize {
-                            None
-                        } else {
-                            Some(requested_page + 1)
-                        };
-
-                        Response::Mempool {
-                            mempool: page.to_vec(),
-                            next_page,
-                        }
-                    }
                     Request::NewBlock { new_block } => Response::NewBlock {
                         status: {
+                            if self.current_job.read().await.is_none() {
+                                return Err(anyhow!("No job yet!"));
+                            }
+                            let current_job = self.current_job.read().await.clone().unwrap();
                             let res = handle_share(
-                                &self.blockchain,
-                                &self.node_state,
-                                new_block.clone(),
+                                &current_job,
+                                &new_block,
+                                &self.share_store,
                                 client_address,
                                 &self.pool_difficulty,
-                                self.pool_private.to_public(),
-                                &self.share_store,
                             )
                             .await;
                             if res.is_ok() {
                                 if new_block
                                     .validate_difficulties(
-                                        &self.blockchain.get_block_difficulty(),
-                                        &self.blockchain.get_transaction_difficulty(),
+                                        &current_job.meta.block_pow_difficulty,
+                                        &current_job.meta.tx_pow_difficulty,
                                     )
                                     .is_ok()
                                 {
-                                    let res = accept_block(
-                                        &self.blockchain,
-                                        &self.node_state,
-                                        new_block.clone(),
-                                    )
-                                    .await;
-                                    if res.is_ok() {
-                                        println!(
-                                            "New block mined by pool: {:?}",
-                                            handle_block(
-                                                &self.node_state,
-                                                &self.blockchain,
-                                                new_block,
-                                                self.pool_private,
-                                                self.pool_dev,
-                                                &self.share_store,
-                                                self.pool_fee
-                                            )
-                                            .await
-                                        );
-                                    }
+                                    let _ = submit_block.send((new_block, client_address)).await;
                                 }
                             }
 
                             res
                         },
                     },
-                    Request::NewTransaction { .. } => {
-                        return Err(anyhow!("Restricted API endpoint accessed"));
-                    }
-                    Request::Difficulty => Response::Difficulty {
-                        transaction_difficulty: self.blockchain.get_transaction_difficulty(),
-                        block_difficulty: self.blockchain.get_block_difficulty(),
-                    },
-                    Request::BlockHeight { hash } => Response::BlockHeight {
-                        height: self.blockchain.block_store().get_block_height_by_hash(hash),
-                    },
-                    Request::LiveTransactionDifficulty => Response::LiveTransactionDifficulty {
-                        live_difficulty: calculate_live_transaction_difficulty(
-                            &self.blockchain.get_transaction_difficulty(),
-                            self.node_state.mempool.mempool_size().await,
-                        ),
-                    },
                     Request::SubscribeToChainEvents => {
-                        let mut rx = self.node_state.chain_events.subscribe();
+                        let mut new_job = job_handler.subscribe();
+                        let current_job = self.current_job.read().await.clone();
+                        if let Some(current_job) = current_job {
+                            let response = Response::ChainEvent {
+                                event: ChainEvent::Block { block: current_job },
+                            };
+                            stream.write_all(&response.encode()?).await?;
+                        }
+
                         // Start event stream task
                         loop {
-                            match rx.recv().await {
-                                Ok(event) => {
-                                    let response = Response::ChainEvent { event };
+                            match new_job.recv().await {
+                                Ok(block) => {
+                                    let response = Response::ChainEvent {
+                                        event: ChainEvent::Block { block },
+                                    };
                                     stream.write_all(&response.encode()?).await?;
                                 }
                                 Err(_) => break,
@@ -262,17 +190,19 @@ impl PoolServer {
                         // Stop request response task
                         return Err(anyhow!("Request response loop ended"));
                     }
+                    _ => {
+                        return Err(anyhow!("Restricted API endpoint accessed"));
+                    }
                 };
                 let response_buf = response.encode()?;
 
-                println!("Sending response {}", ip);
                 stream.write_all(&response_buf).await?;
 
                 Ok::<(), anyhow::Error>(())
             }
             .await
             {
-                println!("API client error from {}: {}", ip, e);
+                println!("Miner error from {}: {}", ip, e);
                 self.add_penalty(ip.clone()).await;
                 break;
             }
@@ -296,48 +226,110 @@ impl PoolServer {
             Self::score_decay_task(ip_scores_clone).await;
         });
 
-        let server = self.clone();
+        let (submit_tx, mut submit_rx) = mpsc::channel(24);
+        let self_clone = self.clone();
+        tokio::spawn(async move {
+            let submit_client = Arc::new(Client::connect(self_clone.pool_api).await.unwrap());
+            loop {
+                let submit: Option<(Block, Public)> = submit_rx.recv().await;
+                let self_clone = self_clone.clone();
+                let submit_client = submit_client.clone();
+                if let Some((block, _public)) = submit {
+                    if let Err(e) = async move {
+                        submit_client.submit_block(block.clone()).await??;
+                        println!("[POOL] Pool mined new block!");
+                        handle_rewards(
+                            &*submit_client,
+                            block,
+                            self_clone.pool_private,
+                            self_clone.pool_dev,
+                            &self_clone.share_store,
+                            self_clone.pool_fee,
+                        )
+                        .await?;
 
+                        Ok::<(), anyhow::Error>(())
+                    }
+                    .await
+                    {
+                        println!("Failed to submit pool block: {e}")
+                    }
+                }
+            }
+        });
+
+        let (job_handler, first_job) = JobHandler::listen(self.pool_api, self.pool_private).await?;
+        let job_handler = Arc::new(job_handler);
+        *self.current_job.write().await = Some(first_job);
+
+        let mut job_updater = job_handler.subscribe();
+
+        let self_clone = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = async {
+                    let job = job_updater.recv().await?;
+                    *self_clone.current_job.write().await = Some(job);
+
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await
+                {
+                    println!("Job updater failed! {e}")
+                }
+            }
+        });
+
+        let self_clone = self.clone();
         Ok(tokio::spawn(async move {
             loop {
-                let server = server.clone();
-                if let Err(e) = async {
-                    let (mut stream, addr) = listener.accept().await?;
+                let job_handler = job_handler.clone();
+                let res = listener.accept().await;
+                if res.is_err() {
+                    continue;
+                }
+                let (mut stream, addr) = res.unwrap();
+                let submit_tx = submit_tx.clone();
+                let self_clone = self_clone.clone();
+                if let Err(e) = async move {
                     let ip = Self::extract_ip(&addr);
 
+                    let self_clone = self_clone.clone();
                     tokio::spawn(async move {
                         // Check if IP is banned
-                        if server.is_banned(&ip).await {
+                        if self_clone.is_banned(&ip).await {
                             let _ = stream.shutdown().await;
                             return;
                         }
 
-                        let server_clone = server.clone();
+                        let self_clone = self_clone.clone();
+                        let self_clone2 = self_clone.clone();
                         let ip_clone = ip.clone();
-                        match timeout(Duration::from_secs(1), async move {
+                        match timeout(Duration::from_secs(5), async move {
                             let mut client_public = [0u8; 32];
                             stream.read_exact(&mut client_public).await?;
-                            stream.write_all(&server_clone.pool_difficulty).await?;
-                            stream
-                                .write_all(server_clone.pool_private.to_public().dump_buf())
-                                .await?;
+                            stream.write_all(&self_clone.pool_difficulty).await?;
 
                             let client_public = Public::new_from_buf(&client_public);
-                            server_clone
-                                .connection(stream, client_public, ip_clone.clone())
-                                .await;
+                            tokio::spawn(self_clone.connection(
+                                stream,
+                                client_public,
+                                ip_clone,
+                                submit_tx,
+                                job_handler.clone(),
+                            ));
                             Ok::<(), anyhow::Error>(())
                         })
                         .await
                         {
                             Err(_t) => {
                                 println!("Handshake failed from {}, timeout", ip);
-                                server.add_penalty(ip).await;
+                                self_clone2.add_penalty(ip).await;
                             }
                             Ok(Ok(())) => {}
                             Ok(Err(e)) => {
                                 println!("Handshake failed from {}, error: {}", ip, e);
-                                server.add_penalty(ip).await;
+                                self_clone2.add_penalty(ip).await;
                             }
                         }
                     });

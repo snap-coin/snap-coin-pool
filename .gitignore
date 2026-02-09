@@ -2,4 +2,4 @@
 /Cargo.lock
 .env
 node-mainnet
-node-pool
+pool-node

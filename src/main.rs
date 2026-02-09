@@ -2,15 +2,13 @@ use std::{net::SocketAddr, sync::Arc};
 
 use dotenvy::dotenv;
 use serde::Deserialize;
-use snap_coin::{
-    crypto::keys::{Private, Public},
-    full_node::{connect_peer, create_full_node, ibd::ibd_blockchain},
-};
+use snap_coin::crypto::keys::{Private, Public};
 
 use crate::{pool_api_server::PoolServer, share_store::ShareStore};
 
-mod handle_block;
+mod handle_rewards;
 mod handle_share;
+mod job_handler;
 mod pool_api_server;
 mod share_store;
 
@@ -26,7 +24,7 @@ where
 
 #[derive(Deserialize)]
 struct Config {
-    pool_node: String,
+    pool_api: String,
     pool_private: String,
     pool_dev: String,
     #[serde(deserialize_with = "de_array")]
@@ -40,33 +38,23 @@ async fn main() -> anyhow::Result<()> {
     dotenv()?;
 
     let config: Config = envy::from_env()?;
-    let pool_node: SocketAddr = config.pool_node.parse()?;
+    let pool_api: SocketAddr = config.pool_api.parse()?;
     let pool_private = Private::new_from_base36(&config.pool_private)
         .ok_or(anyhow::anyhow!("Could not parse pool private"))?;
     let pool_dev = Public::new_from_base36(&config.pool_dev)
         .ok_or(anyhow::anyhow!("Could not parse pool dev"))?;
 
-    // Create and connect to the pool node
-    let (blockchain, node_state) = create_full_node("./pool-node", false);
-    let pool_peer = connect_peer(pool_node, &blockchain, &node_state).await?;
-
-    // Start IBD
-    *node_state.is_syncing.write().await = true;
-    ibd_blockchain(pool_peer, blockchain.clone(), false).await?;
-    *node_state.is_syncing.write().await = false;
-
     let share_store = ShareStore::new();
 
-    let pool_api_server = Arc::new(pool_api_server::PoolServer::new(
+    let pool_api_server = Arc::new(PoolServer::new(
         config.port,
-        blockchain,
-        node_state,
         config.pool_difficulty,
         pool_private,
         pool_dev,
         config.pool_fee,
+        pool_api,
         share_store,
     ));
-    PoolServer::listen(pool_api_server).await?.await?;
+    pool_api_server.listen().await?.await?;
     Ok(())
 }
