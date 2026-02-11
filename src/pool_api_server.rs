@@ -16,7 +16,7 @@ use snap_coin::{
         client::Client,
         requests::{Request, Response},
     },
-    core::block::Block,
+    core::{block::Block, difficulty::calculate_block_difficulty},
     crypto::keys::{Private, Public},
     full_node::node_state::ChainEvent,
 };
@@ -152,7 +152,10 @@ impl PoolServer {
                             if res.is_ok() {
                                 if new_block
                                     .validate_difficulties(
-                                        &current_job.meta.block_pow_difficulty,
+                                        &calculate_block_difficulty(
+                                            &current_job.meta.block_pow_difficulty,
+                                            current_job.transactions.len(),
+                                        ),
                                         &current_job.meta.tx_pow_difficulty,
                                     )
                                     .is_ok()
