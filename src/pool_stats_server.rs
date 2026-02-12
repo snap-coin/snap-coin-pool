@@ -86,8 +86,8 @@ pub enum PoolEvent {
     ShareAccepted {
         miner: String,
         height: u64,
-        work_units: u128,
-        work_total: u128,
+        work_units: u64,
+        work_total: u64,
         timestamp: u64,
     },
     ShareRejected {

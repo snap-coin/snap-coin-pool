@@ -1,13 +1,16 @@
 <!-- =========================================================================
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
-Version: 1.4.7-compact.7
+Version: 1.4.8-compact.8
 
-Changes from v1.4.6-compact.6:
-  - Snapshot hydration:
-      * Fetch GET /api/snapshot on boot + periodically (10s) to hydrate state.
-      * Also accept WS "snapshot" hello message: { type:"snapshot", data:{...} }.
-      * Snapshot updates are best-effort and ONLY fill fields present.
+Changes from v1.4.7-compact.7:
+  - Snapshot recent_events replay:
+      * applySnapshot() now replays snap.recent_events through ingestEvent()
+        so every fresh browser load sees the same feed history.
+      * Added state.replayingSnapshot flag — when true, ingestEvent() skips
+        counter increments (shares, blocks, totals) and savePersisted() calls
+        since snap.totals already provides authoritative counts.
+      * Replay preserves original event timestamps from the backend.
   - No other layout/logic changes.
 ========================================================================  -->
 <!DOCTYPE html>
@@ -819,6 +822,9 @@ Changes from v1.4.6-compact.6:
     feedMode: FEED_MODE_ALL,
     feedMinerOnly: false,
     feedEvents: [],
+
+    // v1.4.8: snapshot replay flag — skips counter bumps in ingestEvent
+    replayingSnapshot: false,
   };
 
   // -------------------------------------------------------------------------
@@ -942,7 +948,7 @@ Changes from v1.4.6-compact.6:
     if(!snap || typeof snap !== "object") return;
 
     // ---------------------------------------------------------------------
-    // NEW: Properly read nested snapshot.totals (backend schema)
+    // Read nested snapshot.totals (backend schema)
     // ---------------------------------------------------------------------
     const totals = snap.totals || null;
     if (totals && typeof totals === "object") {
@@ -1011,11 +1017,54 @@ Changes from v1.4.6-compact.6:
     if(sr !== undefined && isFinite(Number(sr))) state.sharesRejected = Number(sr);
     if(bf !== undefined && isFinite(Number(bf))) state.blocksFound = Number(bf);
 
+    // -----------------------------------------------------------------
+    // v1.4.8: Hydrate daily_buckets into blocksByDay
+    // -----------------------------------------------------------------
+    const buckets = snap.daily_buckets || snap.dailyBuckets || [];
+    if (Array.isArray(buckets)) {
+      for (const b of buckets) {
+        if (!b || !b.date) continue;
+        const dateKey = String(b.date);
+        if (b.blocks !== undefined && isFinite(Number(b.blocks))) {
+          state.blocksByDay[dateKey] = Number(b.blocks);
+        }
+      }
+    }
+
     updateKpis();
 
     const cur = (minerInput.value || "").trim();
     if(cur){
       setMinerView(cur);
+    }
+
+    // -----------------------------------------------------------------
+    // v1.4.8: Replay recent_events into feed + miner maps
+    // Counters are NOT bumped (totals already applied above).
+    // -----------------------------------------------------------------
+    const recentEvts = snap.recent_events || snap.recentEvents || [];
+    if (Array.isArray(recentEvts) && recentEvts.length) {
+      state.replayingSnapshot = true;
+      state.feedEvents = [];
+
+      for (const evt of recentEvts) {
+        if (!evt || !evt.type) continue;
+        // Use original backend timestamp (unix sec → ms), fallback to now
+        const origTs = evt.timestamp ? evt.timestamp * 1000 : Date.now();
+        const savedNow = Date.now;
+        Date.now = () => origTs;
+        try {
+          ingestEvent(evt);
+        } finally {
+          Date.now = savedNow;
+        }
+      }
+
+      state.replayingSnapshot = false;
+      savePersisted();
+      updateKpis();
+      renderFeed();
+      refreshMinerPicker();
     }
   }
 
@@ -1392,7 +1441,10 @@ Changes from v1.4.6-compact.6:
     if(state.feedEvents.length > FEED_MAX){
       state.feedEvents.splice(FEED_MAX);
     }
-    renderFeed();
+    // v1.4.8: skip per-event render during snapshot replay (bulk render after)
+    if(!state.replayingSnapshot){
+      renderFeed();
+    }
   }
 
   function feedModeMatches(cat){
@@ -1837,6 +1889,9 @@ Changes from v1.4.6-compact.6:
     state.lastEvtMs = Date.now();
     lastEvt.textContent = fmtTime(state.lastEvtMs);
 
+    // v1.4.8: helper — true when we should skip counter mutations
+    const replay = state.replayingSnapshot;
+
     switch(ev.type){
       case "snapshot": {
         // WS hello snapshot: { type:"snapshot", data: PoolSnapshot }
@@ -1864,7 +1919,7 @@ Changes from v1.4.6-compact.6:
           miners: miner ? [miner] : [],
         });
 
-        refreshMinerPicker();
+        if(!replay) refreshMinerPicker();
         break;
       }
 
@@ -1885,7 +1940,7 @@ Changes from v1.4.6-compact.6:
           miners: miner ? [miner] : [],
         });
 
-        refreshMinerPicker();
+        if(!replay) refreshMinerPicker();
         break;
       }
 
@@ -1897,21 +1952,24 @@ Changes from v1.4.6-compact.6:
         const workUnits = ev.work_units;
         const workTotal = ev.work_total;
 
-        state.sharesAccepted += 1;
-        pushTs(state.poolShareTimesMs, nowMs);
-
-        sampleHashrateSeries();
-        savePersisted();
+        // v1.4.8: skip counter bump during replay (totals already set)
+        if(!replay){
+          state.sharesAccepted += 1;
+          pushTs(state.poolShareTimesMs, nowMs);
+          sampleHashrateSeries();
+          savePersisted();
+        }
 
         if(miner){
           state.minersActive.add(miner);
           const m = ensureMiner(miner);
 
           m.connectedSeen = true;
-          m.acc += 1;
+          // v1.4.8: only bump miner acc outside replay
+          if(!replay) m.acc += 1;
           m.lastHeight = height ?? m.lastHeight;
           m.lastSeenMs = nowMs;
-          pushTs(m.shareTimesMs, nowMs);
+          if(!replay) pushTs(m.shareTimesMs, nowMs);
 
           if(workTotal !== undefined && workTotal !== null){
             m.workTotal = String(workTotal);
@@ -1936,12 +1994,14 @@ Changes from v1.4.6-compact.6:
           miners: miner ? [miner] : [],
         });
 
-        let cur = (minerInput.value || "").trim();
-        if (cur && !cur.startsWith("Public:")) {
-          cur = "Public: " + cur;
-        }
-        if (cur === miner){
-          setMinerView(miner);
+        if(!replay){
+          let cur = (minerInput.value || "").trim();
+          if (cur && !cur.startsWith("Public:")) {
+            cur = "Public: " + cur;
+          }
+          if (cur === miner){
+            setMinerView(miner);
+          }
         }
 
         break;
@@ -1951,13 +2011,16 @@ Changes from v1.4.6-compact.6:
         const miner = String(ev.miner ?? "").trim();
         const reason = String(ev.reason ?? "").trim();
 
-        state.sharesRejected += 1;
-        savePersisted();
+        // v1.4.8: skip counter bump during replay
+        if(!replay){
+          state.sharesRejected += 1;
+          savePersisted();
+        }
 
         if(miner){
           const m = ensureMiner(miner);
           m.connectedSeen = true;
-          m.rej += 1;
+          if(!replay) m.rej += 1;
           m.lastSeenMs = Date.now();
         }
 
@@ -1970,7 +2033,7 @@ Changes from v1.4.6-compact.6:
           miners: miner ? [miner] : [],
         });
 
-        refreshMinerPicker();
+        if(!replay) refreshMinerPicker();
         break;
       }
 
@@ -1996,12 +2059,16 @@ Changes from v1.4.6-compact.6:
         const bhLink = bh ? explorerLink(bhUrl, bh) : "—";
 
         const blockKey = `block:${height ?? "?"}`;
-        const isNew = addSeenKey(state.seenBlockKeys, blockKey);
-        if(isNew){
-          state.blocksFound += 1;
-          bumpBlocksToday();
-          bumpBlocksThisHour();
-          savePersisted();
+
+        // v1.4.8: skip counter bump during replay
+        if(!replay){
+          const isNew = addSeenKey(state.seenBlockKeys, blockKey);
+          if(isNew){
+            state.blocksFound += 1;
+            bumpBlocksToday();
+            bumpBlocksThisHour();
+            savePersisted();
+          }
         }
 
         pushFeedEvent({
@@ -2043,44 +2110,49 @@ Changes from v1.4.6-compact.6:
         const payoutKey =
           `payout:${height ?? "?"}:${String(totalReward ?? "—")}:${String(poolFee ?? "—")}:${String(minersPaid ?? "—")}`;
 
-        const isNew = addSeenKey(state.seenPayoutKeys, payoutKey);
+        // v1.4.8: skip all counter/payout mutations during replay
+        if(!replay){
+          const isNew = addSeenKey(state.seenPayoutKeys, payoutKey);
 
-        state.lastPayoutHeight = height ?? state.lastPayoutHeight;
-        state.lastPayoutMinersPaid = minersPaid ?? state.lastPayoutMinersPaid;
-        state.lastPayoutTotalReward = totalReward ?? state.lastPayoutTotalReward;
-        state.lastPayoutPoolFee = poolFee ?? state.lastPayoutPoolFee;
+          state.lastPayoutHeight = height ?? state.lastPayoutHeight;
+          state.lastPayoutMinersPaid = minersPaid ?? state.lastPayoutMinersPaid;
+          state.lastPayoutTotalReward = totalReward ?? state.lastPayoutTotalReward;
+          state.lastPayoutPoolFee = poolFee ?? state.lastPayoutPoolFee;
 
-        if(minersNetFromPayouts !== null){
-          state.lastPayoutMinersNetAtomic = String(minersNetFromPayouts);
-        } else {
-          state.lastPayoutMinersNetAtomic = null;
-        }
-
-        if(isNew){
           if(minersNetFromPayouts !== null){
-            state.totalPaidToMinersAtomic = addU128Str(state.totalPaidToMinersAtomic, String(minersNetFromPayouts));
-
-            for(const p of payouts || []){
-              if(!p) continue;
-              const miner = String(p.miner ?? "").trim();
-              if(!miner) continue;
-              const amt = String(p.amount ?? "0");
-              state.minerPaidTotals[miner] = addU128Str(state.minerPaidTotals[miner] || "0", amt);
-              state.minerLastPayout[miner] = { amount: amt, height: height ?? null, ts: (ev.timestamp ?? null) };
-            }
+            state.lastPayoutMinersNetAtomic = String(minersNetFromPayouts);
           } else {
-            const net = rewardNetAtomic(totalReward, poolFee);
-            if(net !== null){
-              state.totalPaidToMinersAtomic = addU128Str(state.totalPaidToMinersAtomic, String(net));
+            state.lastPayoutMinersNetAtomic = null;
+          }
+
+          if(isNew){
+            if(minersNetFromPayouts !== null){
+              state.totalPaidToMinersAtomic = addU128Str(state.totalPaidToMinersAtomic, String(minersNetFromPayouts));
+
+              for(const p of payouts || []){
+                if(!p) continue;
+                const miner = String(p.miner ?? "").trim();
+                if(!miner) continue;
+                const amt = String(p.amount ?? "0");
+                state.minerPaidTotals[miner] = addU128Str(state.minerPaidTotals[miner] || "0", amt);
+                state.minerLastPayout[miner] = { amount: amt, height: height ?? null, ts: (ev.timestamp ?? null) };
+              }
+            } else {
+              const net = rewardNetAtomic(totalReward, poolFee);
+              if(net !== null){
+                state.totalPaidToMinersAtomic = addU128Str(state.totalPaidToMinersAtomic, String(net));
+              }
             }
           }
-        }
 
-        savePersisted();
+          savePersisted();
+        }
 
         const netShown = (minersNetFromPayouts !== null)
           ? fmtReward(String(minersNetFromPayouts))
           : ((rewardNetAtomic(totalReward, poolFee) === null) ? "—" : fmtReward(String(rewardNetAtomic(totalReward, poolFee))));
+
+        const isNewForLabel = !replay ? !state.seenPayoutKeys.has(payoutKey) : false;
 
         // Cyan summary line (+ txid link)
         pushFeedEvent({
@@ -2094,8 +2166,7 @@ Changes from v1.4.6-compact.6:
             ` <span class="t">total=${escapeHtml(fmtReward(totalReward))}</span>` +
             ` <span class="t">net=${escapeHtml(netShown)}</span>` +
             ` <span class="t">fee=${escapeHtml(fmtReward(poolFee))}</span>` +
-            (txid ? ` <span class="t">tx=${txLink}</span>` : ``) +
-            (isNew ? `` : ` <span class="t">(dup)</span>`),
+            (txid ? ` <span class="t">tx=${txLink}</span>` : ``),
           miners: [],
         });
 
@@ -2161,11 +2232,14 @@ Changes from v1.4.6-compact.6:
         break;
     }
 
-    updateKpis();
+    // v1.4.8: skip per-event UI refresh during replay (bulk refresh after)
+    if(!replay){
+      updateKpis();
 
-    const cur = (minerInput.value || "").trim();
-    if(cur){
-      setMinerView(cur);
+      const cur = (minerInput.value || "").trim();
+      if(cur){
+        setMinerView(cur);
+      }
     }
   }
 
@@ -2379,6 +2453,6 @@ Changes from v1.4.6-compact.6:
 <!-- =========================================================================
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
-Version: 1.4.7-compact.7
-Updated: 2026-02-12
+Version: 1.4.8-compact.8
+Updated: 2026-02-12T19:45:00Z
 ========================================================================  -->

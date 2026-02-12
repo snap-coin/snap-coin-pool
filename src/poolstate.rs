@@ -1,7 +1,7 @@
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.0.0-snapshot-ledger.1
+// Version: 1.0.2-snapshot-ledger.3
 //
 // Description: Server-side shared pool state (snapshot hydration) + lightweight
 //              disk persistence (no DB).
@@ -19,6 +19,12 @@
 //   - Recent events are bounded (default 120).
 //   - Daily buckets are bounded (default 30 days).
 //   - Uses an internal UTC day formatter (civil_from_days) to avoid adding chrono.
+//
+// CHANGELOG (v1.0.2-snapshot-ledger.3):
+//   - Completely remove NetworkStats from persistence:
+//       * NetworkStats are NOT written into snapshot fields.
+//       * NetworkStats are NOT stored in recent_events ring.
+//       * Existing loaded recent_events are filtered to remove NetworkStats.
 // ============================================================================
 
 use std::{
@@ -31,11 +37,6 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-/// Import PoolEvent from your stats server module.
-///
-/// IMPORTANT:
-/// This assumes your crate has `mod pool_stats_server;` and the file you pasted
-/// lives at `src/pool_stats_server.rs` (module name `pool_stats_server`).
 use crate::pool_stats_server::PoolEvent;
 
 const DEFAULT_STATE_FILE: &str = "pool_state.json";
@@ -66,22 +67,9 @@ pub struct LastBlock {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct Network {
-    pub height: u64,
-    pub reward: u64,
-    pub difficulty: u64,
-    pub hashrate_hs: u64,
-    pub last_hash: String,
-    pub last_block_secs_ago: u64,
-    pub avg_block_time_secs: u64,
-    pub timestamp: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct PoolSnapshot {
     pub generated_at: u64,
     pub totals: Totals,
-    pub network: Network,
     pub last_block: LastBlock,
     pub daily_buckets: Vec<DailyBucket>,
     pub recent_events: Vec<PoolEvent>,
@@ -111,8 +99,10 @@ impl PoolState {
     ///   - POOL_LEDGER_DIR   (default ".")
     ///   - POOL_LEDGER_ENABLE ("1" default on; set "0" to disable)
     pub async fn new_from_env() -> Self {
-        let state_file = std::env::var("POOL_STATE_FILE").unwrap_or_else(|_| DEFAULT_STATE_FILE.to_string());
-        let ledger_dir = std::env::var("POOL_LEDGER_DIR").unwrap_or_else(|_| DEFAULT_LEDGER_DIR.to_string());
+        let state_file =
+            std::env::var("POOL_STATE_FILE").unwrap_or_else(|_| DEFAULT_STATE_FILE.to_string());
+        let ledger_dir =
+            std::env::var("POOL_LEDGER_DIR").unwrap_or_else(|_| DEFAULT_LEDGER_DIR.to_string());
         let ledger_enable = std::env::var("POOL_LEDGER_ENABLE")
             .ok()
             .map(|v| v != "0")
@@ -123,7 +113,9 @@ impl PoolState {
         // Load existing snapshot file if present.
         let mut snapshot = PoolSnapshot::default();
         if let Ok(bytes) = tokio::fs::read(&state_path).await {
-            if let Ok(loaded) = serde_json::from_slice::<PoolSnapshot>(&bytes) {
+            if let Ok(mut loaded) = serde_json::from_slice::<PoolSnapshot>(&bytes) {
+                // Filter out NetworkStats from older files (hard removal).
+                loaded.recent_events.retain(|e| !is_network_stats(e));
                 snapshot = loaded;
             }
         }
@@ -131,9 +123,15 @@ impl PoolState {
         // Ensure generated_at updates at startup.
         snapshot.generated_at = now_ts();
 
-        // Seed ring buffer from loaded snapshot.
+        // Seed ring buffer from loaded snapshot (filtered).
         let mut recent_events = VecDeque::with_capacity(DEFAULT_RECENT_EVENTS);
-        for e in snapshot.recent_events.iter().cloned().take(DEFAULT_RECENT_EVENTS) {
+        for e in snapshot
+            .recent_events
+            .iter()
+            .cloned()
+            .filter(|e| !is_network_stats(e))
+            .take(DEFAULT_RECENT_EVENTS)
+        {
             recent_events.push_back(e);
         }
 
@@ -170,9 +168,14 @@ impl PoolState {
     /// Update state for a given event.
     /// Call this for *every* PoolEvent you broadcast.
     pub async fn on_event(&self, event: &PoolEvent) {
+        // Hard ignore: NetworkStats never touches state, never touches disk.
+        if is_network_stats(event) {
+            return;
+        }
+
         let mut g = self.inner.lock().await;
 
-        // Maintain recent events ring.
+        // Maintain recent events ring (NetworkStats already filtered out above).
         g.recent_events.push_back(event.clone());
         while g.recent_events.len() > DEFAULT_RECENT_EVENTS {
             g.recent_events.pop_front();
@@ -192,7 +195,11 @@ impl PoolState {
                 timestamp,
                 ..
             } => {
-                g.snapshot.totals.blocks_found = g.snapshot.totals.blocks_found.saturating_add(1);
+                g.snapshot.totals.blocks_found = g
+                    .snapshot
+                    .totals
+                    .blocks_found
+                    .saturating_add(1);
                 g.snapshot.last_block.height = *height;
                 g.snapshot.last_block.hash = hash.clone();
                 g.snapshot.last_block.timestamp = *timestamp;
@@ -211,13 +218,18 @@ impl PoolState {
                 // - If payouts[] present, sum it (authoritative miner-paid amount)
                 // - Else fallback to total_reward - pool_fee (older events).
                 let paid_to_miners = if !payouts.is_empty() {
-                    payouts.iter().fold(0u64, |acc, p| acc.saturating_add(p.amount))
+                    payouts
+                        .iter()
+                        .fold(0u64, |acc, p| acc.saturating_add(p.amount))
                 } else {
                     total_reward.saturating_sub(*pool_fee)
                 };
 
-                g.snapshot.totals.total_paid_to_miners =
-                    g.snapshot.totals.total_paid_to_miners.saturating_add(paid_to_miners);
+                g.snapshot.totals.total_paid_to_miners = g
+                    .snapshot
+                    .totals
+                    .total_paid_to_miners
+                    .saturating_add(paid_to_miners);
 
                 bump_daily_paid(&mut g.snapshot.daily_buckets, *timestamp, paid_to_miners);
                 truncate_daily(&mut g.snapshot.daily_buckets);
@@ -226,25 +238,6 @@ impl PoolState {
                 if g.ledger_enable {
                     let _ = append_ledger_line(&g.ledger_dir, *timestamp, event);
                 }
-            }
-            PoolEvent::NetworkStats {
-                hashrate_hs,
-                difficulty,
-                height,
-                reward,
-                last_hash,
-                last_block_secs_ago,
-                avg_block_time_secs,
-                timestamp,
-            } => {
-                g.snapshot.network.hashrate_hs = *hashrate_hs;
-                g.snapshot.network.difficulty = *difficulty;
-                g.snapshot.network.height = *height;
-                g.snapshot.network.reward = *reward;
-                g.snapshot.network.last_hash = last_hash.clone();
-                g.snapshot.network.last_block_secs_ago = *last_block_secs_ago;
-                g.snapshot.network.avg_block_time_secs = *avg_block_time_secs;
-                g.snapshot.network.timestamp = *timestamp;
             }
             _ => {}
         }
@@ -297,6 +290,11 @@ impl PoolState {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+#[inline]
+fn is_network_stats(e: &PoolEvent) -> bool {
+    matches!(e, PoolEvent::NetworkStats { .. })
+}
 
 fn truncate_daily(buckets: &mut Vec<DailyBucket>) {
     if buckets.len() > DEFAULT_DAILY_DAYS {
@@ -391,6 +389,6 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.0.0-snapshot-ledger.1
-// Updated: 2026-02-11
+// Version: 1.0.2-snapshot-ledger.3
+// Updated: 2026-02-12
 // ============================================================================

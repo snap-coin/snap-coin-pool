@@ -3,3 +3,5 @@
 .env
 node-mainnet
 pool-node
+pool_state.json
+payout_ledger_*.jsonl
