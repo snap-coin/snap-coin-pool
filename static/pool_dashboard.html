@@ -938,14 +938,35 @@ Changes from v1.4.6-compact.6:
     return undefined;
   }
 
-  function applySnapshot(snap){
+    function applySnapshot(snap){
     if(!snap || typeof snap !== "object") return;
 
-    // Accept either a flat PoolSnapshot or nested blocks.
+    // ---------------------------------------------------------------------
+    // NEW: Properly read nested snapshot.totals (backend schema)
+    // ---------------------------------------------------------------------
+    const totals = snap.totals || null;
+    if (totals && typeof totals === "object") {
+      if (totals.shares_acc !== undefined && isFinite(Number(totals.shares_acc))) {
+        state.sharesAccepted = Number(totals.shares_acc);
+      }
+
+      if (totals.shares_rej !== undefined && isFinite(Number(totals.shares_rej))) {
+        state.sharesRejected = Number(totals.shares_rej);
+      }
+
+      if (totals.blocks_found !== undefined && isFinite(Number(totals.blocks_found))) {
+        state.blocksFound = Number(totals.blocks_found);
+      }
+
+      if (totals.total_paid_to_miners !== undefined && totals.total_paid_to_miners !== null) {
+        state.totalPaidToMinersAtomic = String(totals.total_paid_to_miners);
+      }
+    }
+    // ---------------------------------------------------------------------
+
     const net = pick(snap, ["net", "network", "network_stats", "networkStats"]) || snap;
     const payout = pick(snap, ["payout", "last_payout", "lastPayout", "payout_summary", "payoutSummary"]) || snap;
 
-    // ---- Network (matches your NetworkStats UI/state) ----
     const n_hashrate = pick(net, ["hashrate_hs","hashrateHs","network_hashrate_hs"]);
     const n_diff     = pick(net, ["difficulty","network_difficulty"]);
     const n_height   = pick(net, ["height","network_height"]);
@@ -963,7 +984,6 @@ Changes from v1.4.6-compact.6:
     if(n_avgBt    !== undefined && isFinite(Number(n_avgBt)))    state.net.avg_block_time_secs = Number(n_avgBt);
     state.net.last_update_ms = Date.now();
 
-    // ---- Payout summary ----
     const lp_h   = pick(payout, ["last_payout_height","lastPayoutHeight","height"]);
     const lp_mp  = pick(payout, ["last_payout_miners_paid","lastPayoutMinersPaid","miners_paid","minersPaid"]);
     const lp_tot = pick(payout, ["last_payout_total_reward","lastPayoutTotalReward","total_reward","totalReward"]);
@@ -974,19 +994,16 @@ Changes from v1.4.6-compact.6:
     if(lp_tot !== undefined) state.lastPayoutTotalReward = lp_tot;
     if(lp_fee !== undefined) state.lastPayoutPoolFee = lp_fee;
 
-    // Total paid to miners (atomic string expected, but accept numbers too)
     const paidT = pick(snap, ["totalPaidToMinersAtomic","total_paid_to_miners_atomic","total_paid_to_miners"]);
     if(paidT !== undefined && paidT !== null){
       state.totalPaidToMinersAtomic = String(paidT);
     }
 
-    // Optional maps (if snapshot serves them)
     const mPaidTotals = pick(snap, ["minerPaidTotals","miner_paid_totals"]);
     const mLastPayout = pick(snap, ["minerLastPayout","miner_last_payout"]);
     if(mPaidTotals && typeof mPaidTotals === "object") state.minerPaidTotals = mPaidTotals;
     if(mLastPayout && typeof mLastPayout === "object") state.minerLastPayout = mLastPayout;
 
-    // Optional counters (only if present)
     const sa = pick(snap, ["sharesAccepted","shares_accepted"]);
     const sr = pick(snap, ["sharesRejected","shares_rejected"]);
     const bf = pick(snap, ["blocksFound","blocks_found"]);
@@ -1001,6 +1018,7 @@ Changes from v1.4.6-compact.6:
       setMinerView(cur);
     }
   }
+
 
   async function fetchSnapshot(){
     const host = window.location.host;
