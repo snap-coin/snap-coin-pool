@@ -94,6 +94,10 @@ pub async fn handle_rewards(
     .await
     .map_err(|_| BlockchainError::Io("Could not compute pow for reward split tx".to_string()))??;
 
+    println!(
+        "[POOL] Submitting reward transaction: {}",
+        tx.transaction_id.unwrap().dump_base36()
+    );
     client.submit_transaction(tx).await??;
 
     // Clear shares only for those who were paid

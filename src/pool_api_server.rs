@@ -16,7 +16,7 @@ use snap_coin::{
         client::Client,
         requests::{Request, Response},
     },
-    core::{block::Block, difficulty::calculate_block_difficulty},
+    core::block::Block,
     crypto::keys::{Private, Public},
     full_node::node_state::ChainEvent,
 };
@@ -152,10 +152,7 @@ impl PoolServer {
                             if res.is_ok() {
                                 if new_block
                                     .validate_difficulties(
-                                        &calculate_block_difficulty(
-                                            &current_job.meta.block_pow_difficulty,
-                                            current_job.transactions.len(),
-                                        ),
+                                        &current_job.meta.block_pow_difficulty,
                                         &current_job.meta.tx_pow_difficulty,
                                     )
                                     .is_ok()
@@ -240,16 +237,22 @@ impl PoolServer {
                 if let Some((block, _public)) = submit {
                     if let Err(e) = async move {
                         submit_client.submit_block(block.clone()).await??;
-                        println!("[POOL] Pool mined new block!");
-                        handle_rewards(
-                            &*submit_client,
-                            block,
-                            self_clone.pool_private,
-                            self_clone.pool_dev,
-                            &self_clone.share_store,
-                            self_clone.pool_fee,
-                        )
-                        .await?;
+                        println!(
+                            "[POOL] Mined new valid block! {}",
+                            block.meta.hash.unwrap().dump_base36()
+                        );
+                        println!(
+                            "[POOL] Pool reward transaction status: {:?}",
+                            handle_rewards(
+                                &*submit_client,
+                                block,
+                                self_clone.pool_private,
+                                self_clone.pool_dev,
+                                &self_clone.share_store,
+                                self_clone.pool_fee,
+                            )
+                            .await
+                        );
 
                         Ok::<(), anyhow::Error>(())
                     }
