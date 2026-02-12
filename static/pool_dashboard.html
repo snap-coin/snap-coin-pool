@@ -1,0 +1,2366 @@
+<!-- =========================================================================
+File: pool_dashboard.html
+Location: snap-coin-pool/static/pool_dashboard.html
+Version: 1.4.7-compact.7
+
+Changes from v1.4.6-compact.6:
+  - Snapshot hydration:
+      * Fetch GET /api/snapshot on boot + periodically (10s) to hydrate state.
+      * Also accept WS "snapshot" hello message: { type:"snapshot", data:{...} }.
+      * Snapshot updates are best-effort and ONLY fill fields present.
+  - No other layout/logic changes.
+========================================================================  -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Snap Coin Pool — Dashboard</title>
+
+  <style>
+    :root{
+      --bg: #070a0f;
+      --panel: rgba(255,255,255,0.04);
+      --panel2: rgba(255,255,255,0.06);
+      --border: rgba(255,255,255,0.12);
+      --text: rgba(255,255,255,0.92);
+      --muted: rgba(255,255,255,0.62);
+
+      --green: #4cff9b;
+      --cyan: #6fe7ff;
+      --yellow: #ffe066;
+      --red: #ff5c7a;
+      --orange: #ffb86b;
+
+      /* magenta for miner-paid feed lines */
+      --magenta: #ff63d8;
+
+      --shadow: 0 10px 30px rgba(0,0,0,0.45);
+      --radius: 16px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+    }
+
+    *{ box-sizing: border-box; }
+    body{
+      margin:0;
+      background:
+        radial-gradient(1200px 600px at 20% -10%, rgba(76,255,155,0.14), transparent 60%),
+        radial-gradient(900px 500px at 90% 0%, rgba(111,231,255,0.12), transparent 55%),
+        radial-gradient(900px 500px at 70% 120%, rgba(255,224,102,0.08), transparent 60%),
+        var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      height: 100vh;
+      overflow: hidden; /* fit page without scrolling */
+    }
+
+    .wrap{
+      max-width: 1920px;
+      margin: 0 auto;
+      padding: 14px 18px 16px 18px; /* tighter to reclaim space */
+      height: 100vh;
+      overflow: hidden; /* prevent page scroll; internal panels handle overflow */
+      display:flex;
+      flex-direction:column;
+    }
+
+    /* Compact status (no pills) */
+    .statuswrap{
+      display:flex;
+      align-items:center;
+      gap: 12px;
+      flex: 0 0 auto;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .statusline{
+      display:flex;
+      align-items:center;
+      gap: 10px;
+      white-space: nowrap;
+    }
+
+    .dot{
+      width:10px; height:10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.25);
+      box-shadow: 0 0 0 4px rgba(255,255,255,0.04);
+      flex: 0 0 auto;
+    }
+    .dot.ok{ background: var(--green); box-shadow: 0 0 0 4px rgba(76,255,155,0.12); }
+    .dot.bad{ background: var(--red); box-shadow: 0 0 0 4px rgba(255,92,122,0.12); }
+
+    .statuskv .k{ color: rgba(255,255,255,0.45); margin-right: 6px; }
+    .statuskv .v{ color: rgba(255,255,255,0.90); font-weight: 800; }
+
+    /* Main page grid: left=overview, right=miner/feed */
+    .grid{
+      display:grid;
+      grid-template-columns: 1.35fr 0.95fr;
+      gap: 18px;
+      flex: 1 1 auto;          /* fill remaining viewport */
+      min-height: 0;           /* allow children to shrink for internal scrolling */
+    }
+
+    .card{
+      border-radius: var(--radius);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+      min-height: 0;
+    }
+
+    .head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding: 12px 16px; /* slightly tighter */
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), transparent);
+      gap: 10px;
+    }
+
+    .head h2{
+      margin:0;
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: 0.2px;
+    }
+
+    .hint{
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .body{
+      padding: 16px;
+      min-height: 0;
+    }
+
+    .kpis{
+      display:grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+
+    .kpi{
+      background: var(--panel2);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 14px;
+      padding: 12px 12px;
+      min-height: 86px;
+
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:center;
+      text-align:center;
+      gap: 6px;
+    }
+
+    .label{
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      margin: 0;
+    }
+
+    .value{
+      font-family: var(--mono);
+      font-size: 18px;
+      font-weight: 900;
+      letter-spacing: 0.2px;
+      margin: 0;
+    }
+
+    .sub{
+      font-family: var(--mono);
+      font-size: 11px;
+      color: rgba(255,255,255,0.55);
+      margin: 0;
+    }
+
+    .accent-green{ color: var(--green); }
+    .accent-cyan{ color: var(--cyan); }
+    .accent-yellow{ color: var(--yellow); }
+    .accent-red{ color: var(--red); }
+    .accent-orange{ color: var(--orange); }
+    .accent-magenta{ color: var(--magenta); }
+
+    /* Row 1 inside overview: two panels */
+    .row1{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .panel{
+      background: rgba(0,0,0,0.18);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 14px;
+      padding: 12px;
+    }
+
+    .rows .row{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .rows .row:last-child{ border-bottom:none; }
+
+    .left{
+      font-family: var(--mono);
+      font-size: 12px;
+      color: rgba(255,255,255,0.72);
+    }
+
+    .right{
+      font-family: var(--mono);
+      font-size: 12px;
+      color: rgba(255,255,255,0.92);
+      font-weight: 800;
+      text-align:right;
+    }
+
+    /* Full-width panels inside overview */
+    .fullrow{
+      margin-top: 12px;
+    }
+
+    /* Chart block (reused) */
+    .chart-wrap{
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+    .chart-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .chart-title{
+      font-family: var(--mono);
+      font-size: 11px;
+      color: rgba(255,255,255,0.70);
+    }
+    .chart-controls{
+      display:flex;
+      gap: 8px;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+    }
+    .chip{
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(0,0,0,0.18);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: rgba(255,255,255,0.78);
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+    .chip:hover{ background: rgba(255,255,255,0.06); }
+    .chip.on{
+      border-color: rgba(111,231,255,0.35);
+      background: rgba(111,231,255,0.10);
+      color: rgba(255,255,255,0.92);
+      font-weight: 800;
+    }
+
+    canvas{
+      width: 100%;
+      height: 74px;
+      display:block;
+      border-radius: 12px;
+      background: rgba(0,0,0,0.18);
+      border: 1px solid rgba(255,255,255,0.10);
+    }
+
+    /* make blocks chart bigger in full row */
+    #blocks-chart{ height: 95px; }
+
+    /* make hashrate chart bigger than blocks */
+    #hashrate-chart{ height: 110px; }
+
+    .controls{
+      display:flex;
+      gap: 10px;
+      flex-wrap:wrap;
+      margin-bottom: 12px;
+    }
+
+    input[type="text"]{
+      flex: 1;
+      min-width: 240px;
+      padding: 11px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(0,0,0,0.26);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      outline: none;
+    }
+
+    input[type="text"]::placeholder{ color: rgba(255,255,255,0.35); }
+
+    button{
+      padding: 11px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(255,255,255,0.06);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      cursor:pointer;
+    }
+    button:hover{ background: rgba(255,255,255,0.09); }
+    button:active{ transform: translateY(1px); }
+
+    .muted{
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .mini-table{
+      width:100%;
+      border-collapse: collapse;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .mini-table td{
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      vertical-align: top;
+    }
+    .mini-table tr:last-child td{ border-bottom: none; }
+    .mini-table td:first-child{
+      color: rgba(255,255,255,0.62);
+      width: 5%;
+      padding-right: 12px;
+    }
+    .mini-table td:last-child{
+      color: rgba(255,255,255,0.92);
+      font-weight: 800;
+      text-align: right;
+      word-break: break-all;
+    }
+
+    .picker{
+      display:flex;
+      flex-wrap:wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    /* Right column full-height stacking */
+    .rightcol{
+      display:flex;
+      flex-direction:column;
+      gap: 18px;
+      height: 100%;
+      min-height: 0;
+    }
+
+    #miner-card{ flex: 0 0 auto; flex-shrink: 0; }
+
+    .feed{
+      height: 100%;
+      overflow:auto;
+      padding-right: 6px;
+    }
+
+    .evt{
+      border-left: 3px solid rgba(255,255,255,0.18);
+      background: rgba(0,0,0,0.18);
+      border-radius: 12px;
+      padding: 10px 10px;
+      margin-bottom: 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    .evt .t{ color: rgba(255,255,255,0.50); margin-right: 8px; }
+    .evt .tag{ font-weight: 900; }
+
+    .evt.share{ border-left-color: var(--green); }
+    .evt.reject{ border-left-color: var(--red); }
+    .evt.block{ border-left-color: var(--yellow); }
+    .evt.payout{ border-left-color: var(--cyan); }
+    .evt.miner{ border-left-color: rgba(255,255,255,0.35); }
+
+    /* magenta miner payout */
+    .evt.minerpay{ border-left-color: var(--magenta); }
+
+    /* Collapsible Miner Check */
+    .collapse-btn{
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(0,0,0,0.18);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: rgba(255,255,255,0.78);
+      cursor:pointer;
+      user-select:none;
+      white-space: nowrap;
+    }
+    .collapse-btn:hover{ background: rgba(255,255,255,0.06); }
+
+    .card.collapsed .body{ display:none; }
+    .card.collapsed{ flex: 0 0 auto; }
+    .card.collapsed .head{ border-bottom: none; }
+
+    /* Make feed card flex-fill */
+    #feed-card{
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    #feed-card .body{
+      height: 100%;
+      min-height: 0;
+      display:flex;
+      flex-direction:column;
+    }
+    #feed{
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+
+    /* link styling (muted inline, hover highlight) */
+    a.explink{
+      color: var(--muted);
+      text-decoration: none;
+      cursor: pointer;
+      padding: 0 2px;
+      border-radius: 4px;
+      transition: color 0.12s ease, background 0.12s ease;
+    }
+    a.explink:hover{
+      color: rgb(187, 134, 65);
+      background: rgba(255,255,255,0.08);
+    }
+
+    /* miner link styling (clickable miner address in live feed) */
+    .minerlink{
+      cursor: pointer;
+      padding: 0 2px;
+      border-radius: 4px;
+      transition: color 0.12s ease, background 0.12s ease;
+      user-select: text;
+    }
+    .minerlink:hover{
+      color: var(--orange);
+      background: rgba(255,255,255,0.08);
+    }
+
+    @media (max-width: 1100px){
+      body{ overflow:auto; height:auto; }            /* allow scroll on small screens */
+      .wrap{ height:auto; overflow:visible; }
+      .grid{ grid-template-columns: 1fr; min-height: unset; }
+      .kpis{ grid-template-columns: repeat(2, 1fr); }
+      .row1{ grid-template-columns: 1fr; }
+      .rightcol{ height:auto; }
+      #feed-card{ min-height: 420px; }
+
+      /* on small screens, left-align status in Pool Overview header */
+      .statuswrap{ justify-content: flex-start; }
+    }
+
+    ::-webkit-scrollbar { width: 10px; height:10px; }
+    ::-webkit-scrollbar-track { background: rgba(0,0,0,0.25); border-radius: 10px; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 10px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.20); }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+
+    <div class="grid">
+
+      <!-- LEFT: Overview -->
+      <div class="card">
+        <div class="head">
+          <h2>Pool Overview</h2>
+
+          <!-- Moved WS status here (from removed top header) -->
+          <div class="statuswrap" title="WebSocket connection status">
+            <div class="statusline">
+              <span id="status-dot" class="dot"></span>
+              <span id="status-text">Connecting…</span>
+              <span class="statuskv">
+                <span class="k">last_evt:</span><span id="last-evt" class="v">—</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="body">
+          <div class="kpis">
+            <div class="kpi">
+              <div class="label">ACTIVE MINERS</div>
+              <div id="kpi-miners" class="value accent-cyan">0</div>
+              <div class="sub">unique miner IDs seen (session)</div>
+            </div>
+
+            <div class="kpi">
+              <div class="label">POOL HASHRATE</div>
+              <div id="kpi-hr" class="value accent-orange">—</div>
+              <div class="sub">estimated from accepted shares (window)</div>
+            </div>
+
+            <div class="kpi">
+              <div class="label">SHARES (ACC / REJ)</div>
+              <div class="value">
+                <span id="kpi-acc" class="accent-green">0</span>
+                <span style="color:rgba(255,255,255,0.35)">/</span>
+                <span id="kpi-rej" class="accent-red">0</span>
+              </div>
+              <div class="sub">persisted (browser)</div>
+            </div>
+
+            <div class="kpi">
+              <div class="label">BLOCKS FOUND</div>
+              <div id="kpi-blocks" class="value accent-yellow">0</div>
+              <div class="sub">persisted (browser)</div>
+            </div>
+          </div>
+
+          <!-- Row 1: two panels (trimmed) -->
+          <div class="row1">
+            <div class="panel">
+              <div class="label">Network Health</div>
+              <div class="rows">
+                <div class="row">
+                  <div class="left">network_height</div>
+                  <div class="right" id="net-height">—</div>
+                </div>
+                <div class="row">
+                  <div class="left">network_hashrate</div>
+                  <div class="right" id="net-hashrate">—</div>
+                </div>
+                <div class="row">
+                  <div class="left">network_difficulty</div>
+                  <div class="right" id="net-difficulty">—</div>
+                </div>
+                <div class="row">
+                  <div class="left">block_reward</div>
+                  <div class="right" id="net-reward">—</div>
+                </div>
+                <div class="row">
+                  <div class="left">last_block_age</div>
+                  <div class="right" id="net-last-age">—</div>
+                </div>
+                <div class="row">
+                  <div class="left">avg_block_time</div>
+                  <div class="right" id="net-avg-bt">—</div>
+                </div>
+                <div class="row">
+                  <div class="left">last_hash</div>
+                  <div class="right" id="net-last-hash">—</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="label">Pool Payout Summary</div>
+              <div class="rows">
+                <div class="row">
+                  <div class="left">last_payout_height</div>
+                  <div class="right" id="snap-last-payout">—</div>
+                </div>
+
+                <div class="row">
+                  <div class="left">Total reward</div>
+                  <div class="right" id="snap-last-payout-total">—</div>
+                </div>
+                <div class="row">
+                  <div class="left">Miners reward (net)</div>
+                  <div class="right" id="snap-last-payout-net">—</div>
+                </div>
+                <div class="row">
+                  <div class="left">Pool fee</div>
+                  <div class="right" id="snap-last-payout-fee">—</div>
+                </div>
+                <div class="row">
+                  <div class="left">Miners paid (count)</div>
+                  <div class="right" id="snap-last-payout-miners">—</div>
+                </div>
+
+                <div class="row">
+                  <div class="left">Total paid to miners</div>
+                  <div class="right" id="snap-total-paid-miners">—</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Row 2: Pool Blocks (full width) -->
+          <div class="fullrow">
+            <div class="panel">
+              <div class="chart-wrap">
+                <div class="chart-head">
+                  <div class="chart-title" id="blocks-chart-title">Blocks per day</div>
+                  <div class="chart-controls">
+                    <div id="blocks-1d" class="chip">1d</div>
+                    <div id="blocks-7d" class="chip on">7d</div>
+                    <div id="blocks-30d" class="chip">30d</div>
+                  </div>
+                </div>
+                <canvas id="blocks-chart" width="1200" height="260"></canvas>
+                <div class="muted" style="margin-top:10px;">
+                  Counts are persisted in this browser via localStorage (best-effort dedupe by height).
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Row 3: Pool Hashrate (full width, bigger) -->
+          <div class="fullrow">
+            <div class="panel">
+              <div class="chart-wrap">
+                <div class="chart-head">
+                  <div class="chart-title" id="hr-chart-title">Hashrate (windowed estimate)</div>
+                  <div class="chart-controls">
+                    <div id="hr-1h" class="chip">1h</div>
+                    <div id="hr-6h" class="chip on">6h</div>
+                    <div id="hr-24h" class="chip">24h</div>
+                  </div>
+                </div>
+                <canvas id="hashrate-chart" width="1200" height="420"></canvas>
+                <div class="muted" style="margin-top:10px;">
+                  Samples are taken in-browser from share timing (no backend series yet). Persisted via localStorage (best-effort).
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- RIGHT: Miner check + feed -->
+      <div class="rightcol">
+        <div id="miner-card" class="card">
+          <div class="head">
+            <h2>Miner Check (by addy)</h2>
+            <div style="display:flex; align-items:center; gap:10px;">
+              <div class="hint">exact match (session)</div>
+              <div id="miner-collapse-btn" class="collapse-btn" title="Collapse/expand Miner Check">Collapse</div>
+            </div>
+          </div>
+
+          <div class="body">
+            <div class="controls">
+              <input id="miner-input" type="text" placeholder="enter miner id / address (exact match to event.miner)"/>
+              <button id="miner-btn">Check</button>
+              <button id="miner-clear">Clear</button>
+            </div>
+
+            <div class="panel">
+              <table class="mini-table">
+
+                <tr class="miner-row"><td>miner</td><td id="m-miner">—</td></tr>
+                <tr><td>connected (seen)</td><td id="m-connected">—</td></tr>
+                <tr><td>shares (acc / rej)</td><td id="m-shares">—</td></tr>
+                <tr><td>last_share_height</td><td id="m-last-h">—</td></tr>
+                <tr><td>hashrate (window)</td><td id="m-hr">—</td></tr>
+                <tr><td>paid_total (persist)</td><td id="m-paid">—</td></tr>
+                <tr><td>last_payout_amount</td><td id="m-last-pay-amt">—</td></tr>
+                <tr><td>last_payout_height</td><td id="m-last-pay-h">—</td></tr>
+                <tr><td>last_payout_time</td><td id="m-last-pay-ts">—</td></tr>
+                <tr><td>share_rate (1m/15m/24h)</td><td id="m-rate">—</td></tr>
+                <tr><td>est_hashrate (1m/15m/24h)</td><td id="m-hr3">—</td></tr>
+              </table>
+              <div class="muted" style="margin-top: 10px;">
+                Hashrate uses fixed diff 65536 and share timing based on browser receive-time.
+              </div>
+            </div>
+
+            <div class="picker" id="miner-picker" style="display:none;"></div>
+          </div>
+        </div>
+
+        <div id="feed-card" class="card">
+          <div class="head">
+            <h2>Live Event Feed</h2>
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
+              <div id="feed-all" class="chip on">All</div>
+              <div id="feed-shares" class="chip">Shares</div>
+              <div id="feed-blocks" class="chip">Blocks</div>
+              <div id="feed-payouts" class="chip">Payouts</div>
+              <div id="feed-miner-only" class="chip" title="Show only events for the current Miner Check addy">Miner</div>
+              <div class="hint">last 120 events</div>
+            </div>
+          </div>
+          <div class="body">
+            <div id="feed" class="feed"></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+<script>
+(() => {
+  // -------------------------------------------------------------------------
+  // Config
+  // -------------------------------------------------------------------------
+  const SHARE_DIFF = 65536;
+  const HR_WINDOW_SHARES = 20;
+  const MAX_TS = 300;
+  const FEED_MAX = 120;
+
+  const COIN_DECIMALS = 8;
+  const COIN_SYMBOL  = "SNAP";
+  const COIN_DIVISOR = Math.pow(10, COIN_DECIMALS);
+
+  const LS_KEY = "snap_pool_dashboard_v1";
+  const MAX_SEEN_KEYS = 2048;
+
+  const MAX_HR_POINTS = 4000;
+  const MAX_MINER_PAYOUT_KEYS = 2500;
+
+  const BLOCKS_MODE_1D = "1d";
+  const BLOCKS_MODE_7D = "7d";
+  const BLOCKS_MODE_30D = "30d";
+
+  const HR_MODE_1H = "1h";
+  const HR_MODE_6H = "6h";
+  const HR_MODE_24H = "24h";
+
+  const HR_SAMPLE_MS = 5000;
+
+  const UI_KEY = "snap_pool_dashboard_ui_v1";
+
+  const FEED_MODE_ALL = "all";
+  const FEED_MODE_SHARES = "shares";
+  const FEED_MODE_BLOCKS = "blocks";
+  const FEED_MODE_PAYOUTS = "payouts";
+
+  // Explorer endpoints (per Snap Coin dev)
+  const EXPLORER_TX_BASE = "https://explorer.snap-coin.net/tx/";
+  const EXPLORER_BLOCK_BASE = "https://explorer.snap-coin.net/block/";
+
+  // Snapshot endpoint (backend: GET /api/snapshot)
+  const SNAPSHOT_URL = "/api/snapshot";
+  const SNAPSHOT_POLL_MS = 10000; // 10s best-effort hydration
+
+  // -------------------------------------------------------------------------
+  // State
+  // -------------------------------------------------------------------------
+  const state = {
+    connected: false,
+    lastEvtMs: 0,
+
+    minersActive: new Set(),
+    sharesAccepted: 0,
+    sharesRejected: 0,
+    blocksFound: 0,
+
+    lastPayoutHeight: null,
+    lastPayoutMinersPaid: null,
+    lastPayoutTotalReward: null,
+    lastPayoutPoolFee: null,
+    lastPayoutMinersNetAtomic: null,
+    totalPaidToMinersAtomic: "0",
+
+    minerPaidTotals: {},
+    minerLastPayout: {},
+
+    blocksByDay: {},
+    blocksByHour: {},
+
+    seenPayoutKeys: new Set(),
+    seenBlockKeys: new Set(),
+
+    poolShareTimesMs: [],
+    miners: new Map(),
+
+    net: {
+      hashrate_hs: null,
+      difficulty: null,
+      height: null,
+      reward: null,
+      last_hash: null,
+      last_block_secs_ago: null,
+      avg_block_time_secs: null,
+      last_update_ms: 0,
+    },
+
+    blocksMode: BLOCKS_MODE_7D,
+
+    hrSeries: [],
+    hrMode: HR_MODE_6H,
+    lastHrSampleMs: 0,
+
+    minerCollapsed: false,
+
+    feedMode: FEED_MODE_ALL,
+    feedMinerOnly: false,
+    feedEvents: [],
+  };
+
+  // -------------------------------------------------------------------------
+  // DOM helpers
+  // -------------------------------------------------------------------------
+  const el = (id) => document.getElementById(id);
+
+  const statusDot = el("status-dot");
+  const statusText = el("status-text");
+  const lastEvt = el("last-evt");
+
+  const kpiMiners = el("kpi-miners");
+  const kpiHr = el("kpi-hr");
+  const kpiAcc = el("kpi-acc");
+  const kpiRej = el("kpi-rej");
+  const kpiBlocks = el("kpi-blocks");
+
+  const snapLastPayout = el("snap-last-payout");
+  const snapLastPayoutMiners = el("snap-last-payout-miners");
+  const snapLastPayoutTotal = el("snap-last-payout-total");
+  const snapLastPayoutNet = el("snap-last-payout-net");
+  const snapLastPayoutFee = el("snap-last-payout-fee");
+  const snapTotalPaidMiners = el("snap-total-paid-miners");
+
+  const netHeight = el("net-height");
+  const netHashrate = el("net-hashrate");
+  const netDifficulty = el("net-difficulty");
+  const netReward = el("net-reward");
+  const netLastAge = el("net-last-age");
+  const netAvgBt = el("net-avg-bt");
+  const netLastHash = el("net-last-hash");
+
+  const feed = el("feed");
+
+  const minerCard = el("miner-card");
+  const minerCollapseBtn = el("miner-collapse-btn");
+  const minerInput = el("miner-input");
+  const minerBtn = el("miner-btn");
+  const minerClear = el("miner-clear");
+  const minerPicker = el("miner-picker");
+
+  const mMiner = el("m-miner");
+  const mConnected = el("m-connected");
+  const mShares = el("m-shares");
+  const mLastH = el("m-last-h");
+  const mHR = el("m-hr");
+
+  const mPaid = el("m-paid");
+  const mLastPayAmt = el("m-last-pay-amt");
+  const mLastPayH = el("m-last-pay-h");
+  const mLastPayTs = el("m-last-pay-ts");
+  const mRate = el("m-rate");
+  const mHR3 = el("m-hr3");
+
+  const blocks1d = el("blocks-1d");
+  const blocks7d = el("blocks-7d");
+  const blocks30d = el("blocks-30d");
+  const blocksChartTitle = el("blocks-chart-title");
+  const blocksChart = el("blocks-chart");
+  const blocksChartCtx = blocksChart.getContext("2d");
+
+  const hr1h = el("hr-1h");
+  const hr6h = el("hr-6h");
+  const hr24h = el("hr-24h");
+  const hrChartTitle = el("hr-chart-title");
+  const hrChart = el("hashrate-chart");
+  const hrChartCtx = hrChart.getContext("2d");
+
+  const feedAll = el("feed-all");
+  const feedShares = el("feed-shares");
+  const feedBlocks = el("feed-blocks");
+  const feedPayouts = el("feed-payouts");
+  const feedMinerOnly = el("feed-miner-only");
+
+  // -------------------------------------------------------------------------
+  // Small helpers
+  // -------------------------------------------------------------------------
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replace(/&/g,"&amp;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;")
+      .replace(/'/g,"&#39;");
+  }
+
+  function explorerTxUrl(txid){
+    const t = String(txid ?? "").trim();
+    if(!t) return "";
+    return EXPLORER_TX_BASE + encodeURIComponent(t);
+  }
+
+  function explorerBlockUrl(hash){
+    const h = String(hash ?? "").trim();
+    if(!h) return "";
+    return EXPLORER_BLOCK_BASE + encodeURIComponent(h);
+  }
+
+  function explorerLink(url, label){
+    const u = String(url ?? "").trim();
+    if(!u) return escapeHtml(label);
+    return `<a class="explink" href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`;
+  }
+
+  function minerSpan(minerId, extraClass){
+    const m = String(minerId ?? "").trim();
+    const cls = extraClass ? `minerlink ${extraClass}` : "minerlink";
+    return `<span class="${cls}" data-miner="${escapeHtml(m)}">${escapeHtml(m)}</span>`;
+  }
+
+  // Snapshot best-effort helpers
+  function pick(obj, keys){
+    if(!obj || typeof obj !== "object") return undefined;
+    for(const k of keys){
+      if(obj[k] !== undefined && obj[k] !== null) return obj[k];
+    }
+    return undefined;
+  }
+
+  function applySnapshot(snap){
+    if(!snap || typeof snap !== "object") return;
+
+    // Accept either a flat PoolSnapshot or nested blocks.
+    const net = pick(snap, ["net", "network", "network_stats", "networkStats"]) || snap;
+    const payout = pick(snap, ["payout", "last_payout", "lastPayout", "payout_summary", "payoutSummary"]) || snap;
+
+    // ---- Network (matches your NetworkStats UI/state) ----
+    const n_hashrate = pick(net, ["hashrate_hs","hashrateHs","network_hashrate_hs"]);
+    const n_diff     = pick(net, ["difficulty","network_difficulty"]);
+    const n_height   = pick(net, ["height","network_height"]);
+    const n_reward   = pick(net, ["reward","block_reward"]);
+    const n_lastHash = pick(net, ["last_hash","lastHash"]);
+    const n_age      = pick(net, ["last_block_secs_ago","lastBlockSecsAgo"]);
+    const n_avgBt    = pick(net, ["avg_block_time_secs","avgBlockTimeSecs"]);
+
+    if(n_hashrate !== undefined && isFinite(Number(n_hashrate))) state.net.hashrate_hs = Number(n_hashrate);
+    if(n_diff     !== undefined && isFinite(Number(n_diff)))     state.net.difficulty  = Number(n_diff);
+    if(n_height   !== undefined && isFinite(Number(n_height)))   state.net.height      = Number(n_height);
+    if(n_reward   !== undefined) state.net.reward = n_reward;
+    if(n_lastHash !== undefined) state.net.last_hash = String(n_lastHash);
+    if(n_age      !== undefined && isFinite(Number(n_age)))      state.net.last_block_secs_ago = Number(n_age);
+    if(n_avgBt    !== undefined && isFinite(Number(n_avgBt)))    state.net.avg_block_time_secs = Number(n_avgBt);
+    state.net.last_update_ms = Date.now();
+
+    // ---- Payout summary ----
+    const lp_h   = pick(payout, ["last_payout_height","lastPayoutHeight","height"]);
+    const lp_mp  = pick(payout, ["last_payout_miners_paid","lastPayoutMinersPaid","miners_paid","minersPaid"]);
+    const lp_tot = pick(payout, ["last_payout_total_reward","lastPayoutTotalReward","total_reward","totalReward"]);
+    const lp_fee = pick(payout, ["last_payout_pool_fee","lastPayoutPoolFee","pool_fee","poolFee"]);
+
+    if(lp_h  !== undefined && isFinite(Number(lp_h)))   state.lastPayoutHeight = Number(lp_h);
+    if(lp_mp !== undefined && isFinite(Number(lp_mp)))  state.lastPayoutMinersPaid = Number(lp_mp);
+    if(lp_tot !== undefined) state.lastPayoutTotalReward = lp_tot;
+    if(lp_fee !== undefined) state.lastPayoutPoolFee = lp_fee;
+
+    // Total paid to miners (atomic string expected, but accept numbers too)
+    const paidT = pick(snap, ["totalPaidToMinersAtomic","total_paid_to_miners_atomic","total_paid_to_miners"]);
+    if(paidT !== undefined && paidT !== null){
+      state.totalPaidToMinersAtomic = String(paidT);
+    }
+
+    // Optional maps (if snapshot serves them)
+    const mPaidTotals = pick(snap, ["minerPaidTotals","miner_paid_totals"]);
+    const mLastPayout = pick(snap, ["minerLastPayout","miner_last_payout"]);
+    if(mPaidTotals && typeof mPaidTotals === "object") state.minerPaidTotals = mPaidTotals;
+    if(mLastPayout && typeof mLastPayout === "object") state.minerLastPayout = mLastPayout;
+
+    // Optional counters (only if present)
+    const sa = pick(snap, ["sharesAccepted","shares_accepted"]);
+    const sr = pick(snap, ["sharesRejected","shares_rejected"]);
+    const bf = pick(snap, ["blocksFound","blocks_found"]);
+    if(sa !== undefined && isFinite(Number(sa))) state.sharesAccepted = Number(sa);
+    if(sr !== undefined && isFinite(Number(sr))) state.sharesRejected = Number(sr);
+    if(bf !== undefined && isFinite(Number(bf))) state.blocksFound = Number(bf);
+
+    updateKpis();
+
+    const cur = (minerInput.value || "").trim();
+    if(cur){
+      setMinerView(cur);
+    }
+  }
+
+  async function fetchSnapshot(){
+    const host = window.location.host;
+    if(!host) return; // file://
+
+    try{
+      const res = await fetch(SNAPSHOT_URL, { cache: "no-store" });
+      if(!res || !res.ok) return;
+      const snap = await res.json();
+      applySnapshot(snap);
+    } catch {
+      // best-effort
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Persistence helpers
+  // -------------------------------------------------------------------------
+  function safeJsonParse(s){
+    try{ return JSON.parse(s); } catch { return null; }
+  }
+
+  function loadUiPrefs(){
+    const raw = localStorage.getItem(UI_KEY);
+    const obj = raw ? safeJsonParse(raw) : null;
+    if(obj && typeof obj === "object"){
+      if(typeof obj.minerCollapsed === "boolean") state.minerCollapsed = obj.minerCollapsed;
+    }
+  }
+
+  function saveUiPrefs(){
+    try{
+      localStorage.setItem(UI_KEY, JSON.stringify({ minerCollapsed: state.minerCollapsed }));
+    } catch {}
+  }
+
+  function loadPersisted(){
+    const raw = localStorage.getItem(LS_KEY);
+    if(!raw) return;
+    const obj = safeJsonParse(raw);
+    if(!obj || typeof obj !== "object") return;
+
+    if(typeof obj.sharesAccepted === "number") state.sharesAccepted = obj.sharesAccepted;
+    if(typeof obj.sharesRejected === "number") state.sharesRejected = obj.sharesRejected;
+    if(typeof obj.blocksFound === "number") state.blocksFound = obj.blocksFound;
+
+    if(typeof obj.lastPayoutHeight === "number") state.lastPayoutHeight = obj.lastPayoutHeight;
+    if(typeof obj.lastPayoutMinersPaid === "number") state.lastPayoutMinersPaid = obj.lastPayoutMinersPaid;
+    if(obj.lastPayoutTotalReward !== undefined && obj.lastPayoutTotalReward !== null) state.lastPayoutTotalReward = obj.lastPayoutTotalReward;
+    if(obj.lastPayoutPoolFee !== undefined && obj.lastPayoutPoolFee !== null) state.lastPayoutPoolFee = obj.lastPayoutPoolFee;
+
+    if(obj.lastPayoutMinersNetAtomic !== undefined && obj.lastPayoutMinersNetAtomic !== null){
+      state.lastPayoutMinersNetAtomic = String(obj.lastPayoutMinersNetAtomic);
+    }
+
+    if(typeof obj.totalPaidToMinersAtomic === "string") state.totalPaidToMinersAtomic = obj.totalPaidToMinersAtomic;
+
+    if(obj.minerPaidTotals && typeof obj.minerPaidTotals === "object") state.minerPaidTotals = obj.minerPaidTotals;
+    if(obj.minerLastPayout && typeof obj.minerLastPayout === "object") state.minerLastPayout = obj.minerLastPayout;
+
+    if(obj.blocksByDay && typeof obj.blocksByDay === "object") state.blocksByDay = obj.blocksByDay;
+    if(obj.blocksByHour && typeof obj.blocksByHour === "object") state.blocksByHour = obj.blocksByHour;
+
+    if(Array.isArray(obj.seenPayoutKeys)){
+      state.seenPayoutKeys = new Set(obj.seenPayoutKeys.slice(-2048));
+    }
+    if(Array.isArray(obj.seenBlockKeys)){
+      state.seenBlockKeys = new Set(obj.seenBlockKeys.slice(-2048));
+    }
+
+    if(obj.blocksMode === BLOCKS_MODE_1D || obj.blocksMode === BLOCKS_MODE_7D || obj.blocksMode === BLOCKS_MODE_30D){
+      state.blocksMode = obj.blocksMode;
+    }
+
+    if(Array.isArray(obj.hrSeries)){
+      const pts = obj.hrSeries
+        .filter(p => p && typeof p.t === "number" && typeof p.v === "number" && isFinite(p.t) && isFinite(p.v))
+        .slice(-4000);
+      state.hrSeries = pts;
+    }
+
+    if(obj.hrMode === HR_MODE_1H || obj.hrMode === HR_MODE_6H || obj.hrMode === HR_MODE_24H){
+      state.hrMode = obj.hrMode;
+    }
+  }
+
+  function savePersisted(){
+    const minerKeys = Object.keys(state.minerPaidTotals || {});
+    if(minerKeys.length > 2500){
+      const scored = minerKeys.map(k => {
+        const lp = state.minerLastPayout[k];
+        const ts = (lp && typeof lp.ts === "number") ? lp.ts : 0;
+        return { k, ts };
+      }).sort((a,b) => a.ts - b.ts);
+      const dropN = scored.length - 2500;
+      for(let i=0; i<dropN; i++){
+        delete state.minerPaidTotals[scored[i].k];
+        delete state.minerLastPayout[scored[i].k];
+      }
+    }
+
+    const payload = {
+      sharesAccepted: state.sharesAccepted,
+      sharesRejected: state.sharesRejected,
+      blocksFound: state.blocksFound,
+
+      lastPayoutHeight: state.lastPayoutHeight,
+      lastPayoutMinersPaid: state.lastPayoutMinersPaid,
+      lastPayoutTotalReward: state.lastPayoutTotalReward,
+      lastPayoutPoolFee: state.lastPayoutPoolFee,
+      lastPayoutMinersNetAtomic: state.lastPayoutMinersNetAtomic,
+
+      totalPaidToMinersAtomic: state.totalPaidToMinersAtomic,
+
+      minerPaidTotals: state.minerPaidTotals,
+      minerLastPayout: state.minerLastPayout,
+
+      blocksByDay: state.blocksByDay,
+      blocksByHour: state.blocksByHour,
+
+      seenPayoutKeys: Array.from(state.seenPayoutKeys).slice(-2048),
+      seenBlockKeys: Array.from(state.seenBlockKeys).slice(-2048),
+
+      blocksMode: state.blocksMode,
+
+      hrSeries: state.hrSeries.slice(-4000),
+      hrMode: state.hrMode,
+    };
+
+    try{ localStorage.setItem(LS_KEY, JSON.stringify(payload)); } catch {}
+  }
+
+  // -------------------------------------------------------------------------
+  // Formatting + math
+  // -------------------------------------------------------------------------
+  function fmtTime(ms){
+    if(!ms) return "—";
+    return new Date(ms).toLocaleTimeString();
+  }
+
+  function fmtUnixSec(sec){
+    if(!sec) return "—";
+    return new Date(sec * 1000).toLocaleTimeString();
+  }
+
+  function fmtU128Like(v){
+    if (v === null || v === undefined) return "—";
+    try{
+      const s = String(v);
+      return s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    } catch {
+      return String(v);
+    }
+  }
+
+  function fmtHashTrunc(s){
+    const v = String(s || "").trim();
+    if(!v || v === "unknown") return "—";
+    if(v.length <= 16) return v;
+    return v.slice(0, 8) + "…" + v.slice(-8);
+  }
+
+  function fmtAgeSeconds(sec){
+    if(sec === null || sec === undefined) return "—";
+    const v = Number(sec);
+    if(!isFinite(v) || v < 0) return "—";
+    if(v < 60) return `${Math.floor(v)}s`;
+    if(v < 3600) return `${Math.floor(v/60)}m ${Math.floor(v%60)}s`;
+    const h = Math.floor(v/3600);
+    const m = Math.floor((v%3600)/60);
+    return `${h}h ${m}m`;
+  }
+
+  function fmtReward(v){
+    if(v === null || v === undefined) return "—";
+    try{
+      const raw = BigInt(String(v));
+      const divisor = BigInt(COIN_DIVISOR);
+      const whole = raw / divisor;
+      const frac  = raw % divisor;
+
+      let fracStr = frac.toString().padStart(COIN_DECIMALS, "0").replace(/0+$/, "");
+
+      if(fracStr.length === 0){
+        return `${whole.toLocaleString()} ${COIN_SYMBOL}`;
+      }
+      return `${whole.toLocaleString()}.${fracStr} ${COIN_SYMBOL}`;
+    } catch {
+      return String(v);
+    }
+  }
+
+  function rewardNetAtomic(total, fee){
+    if(total === null || total === undefined) return null;
+    if(fee === null || fee === undefined) return null;
+    try{
+      const t = BigInt(String(total));
+      const f = BigInt(String(fee));
+      const n = t - f;
+      return (n >= 0n) ? n : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function sumPayoutsAtomic(payouts){
+    if(!Array.isArray(payouts) || payouts.length === 0) return null;
+    try{
+      let sum = 0n;
+      for(const p of payouts){
+        if(!p) continue;
+        if(p.amount === null || p.amount === undefined) continue;
+        sum += BigInt(String(p.amount));
+      }
+      return sum;
+    } catch {
+      return null;
+    }
+  }
+
+  function addU128Str(aStr, bStr){
+    try{
+      const a = BigInt(String(aStr || "0"));
+      const b = BigInt(String(bStr || "0"));
+      return String(a + b);
+    } catch {
+      return String(aStr || "0");
+    }
+  }
+
+  function pushTs(arr, ms){
+    arr.push(ms);
+    if(arr.length > 300) arr.splice(0, arr.length - 300);
+  }
+
+  function computeHashrateFromTs(arr){
+    if(!arr || arr.length < 2) return null;
+    const n = Math.min(arr.length, 20);
+    if(n < 2) return null;
+    const slice = arr.slice(arr.length - n);
+    const dt = (slice[slice.length - 1] - slice[0]) / 1000.0;
+    if(dt <= 0) return null;
+    const sharesPerSec = (slice.length - 1) / dt;
+    return sharesPerSec * SHARE_DIFF;
+  }
+
+  function fmtHashrate(hs){
+    if(hs === null || hs === undefined) return "—";
+    const v = Number(hs);
+    if(!isFinite(v) || v < 0) return "—";
+    if(v >= 1e12) return (v/1e12).toFixed(2) + " TH/s";
+    if(v >= 1e9)  return (v/1e9).toFixed(2)  + " GH/s";
+    if(v >= 1e6)  return (v/1e6).toFixed(2)  + " MH/s";
+    if(v >= 1e3)  return (v/1e3).toFixed(2)  + " KH/s";
+    return v.toFixed(2) + " H/s";
+  }
+
+  function countWithinWindowMs(timesMs, windowSec){
+    const now = Date.now();
+    const cutoff = now - (windowSec * 1000);
+    let c = 0;
+    for(let i=timesMs.length-1; i>=0; i--){
+      if(timesMs[i] >= cutoff) c++;
+      else break;
+    }
+    return c;
+  }
+
+  function ratePerSec(count, windowSec){
+    if(windowSec <= 0) return 0;
+    return count / windowSec;
+  }
+
+  function dayKey(d){
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const da = String(d.getDate()).padStart(2,"0");
+    return `${y}-${m}-${da}`;
+  }
+
+  function dayKeyFromNow(daysAgo){
+    const d = new Date();
+    d.setHours(0,0,0,0);
+    d.setDate(d.getDate() - daysAgo);
+    return dayKey(d);
+  }
+
+  function todayKey(){ return dayKeyFromNow(0); }
+
+  function hourKey(d){
+    const base = dayKey(d);
+    const hh = String(d.getHours()).padStart(2,"0");
+    return `${base}T${hh}`;
+  }
+
+  function hourKeyFromNowHours(hoursAgo){
+    const d = new Date();
+    d.setMinutes(0,0,0);
+    d.setHours(d.getHours() - hoursAgo);
+    return hourKey(d);
+  }
+
+  function pruneBlocksByDay(){
+    const keep = new Set();
+    for(let i=0; i<45; i++) keep.add(dayKeyFromNow(i));
+    const out = {};
+    for(const k of Object.keys(state.blocksByDay || {})){
+      if(keep.has(k)) out[k] = state.blocksByDay[k];
+    }
+    state.blocksByDay = out;
+  }
+
+  function pruneBlocksByHour(){
+    const keep = new Set();
+    for(let i=0; i<72; i++) keep.add(hourKeyFromNowHours(i));
+    const out = {};
+    for(const k of Object.keys(state.blocksByHour || {})){
+      if(keep.has(k)) out[k] = state.blocksByHour[k];
+    }
+    state.blocksByHour = out;
+  }
+
+  // -------------------------------------------------------------------------
+  // Miner aggregation
+  // -------------------------------------------------------------------------
+  function ensureMiner(minerId){
+    if(!state.miners.has(minerId)){
+      state.miners.set(minerId, {
+        connectedSeen: false,
+        ip: null,
+        acc: 0,
+        rej: 0,
+        lastHeight: null,
+        workTotal: "0",
+        lastSeenMs: 0,
+        shareTimesMs: [],
+      });
+    }
+    return state.miners.get(minerId);
+  }
+
+  function refreshMinerPicker(){
+    const ids = Array.from(state.miners.keys()).sort();
+    if(ids.length === 0){
+      minerPicker.style.display = "none";
+      minerPicker.innerHTML = "";
+      return;
+    }
+
+    minerPicker.style.display = "flex";
+    minerPicker.innerHTML = "";
+    for(const id of ids){
+      const chip = document.createElement("div");
+      chip.className = "chip";
+      chip.textContent = id;
+      chip.title = "Click to fill + check";
+      chip.addEventListener("click", () => {
+        minerInput.value = id;
+        setMinerView(id);
+        renderFeed();
+      });
+      minerPicker.appendChild(chip);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Feed buffering + filtering
+  // -------------------------------------------------------------------------
+  function pushFeedEvent(e){
+    state.feedEvents.unshift(e);
+    if(state.feedEvents.length > FEED_MAX){
+      state.feedEvents.splice(FEED_MAX);
+    }
+    renderFeed();
+  }
+
+  function feedModeMatches(cat){
+    if(state.feedMode === FEED_MODE_ALL) return true;
+    return cat === state.feedMode;
+  }
+
+  function feedMinerMatches(minersArr){
+    if(!state.feedMinerOnly) return true;
+
+    const cur = (minerInput.value || "").trim();
+    if(!cur) return true;
+
+    if(!Array.isArray(minersArr) || minersArr.length === 0) return false;
+    return minersArr.includes(cur);
+  }
+
+  function renderFeed(){
+    feed.innerHTML = "";
+
+    for(const e of state.feedEvents){
+      if(!feedModeMatches(e.cat)) continue;
+      if(!feedMinerMatches(e.miners)) continue;
+
+      const d = document.createElement("div");
+      d.className = "evt " + e.typeClass;
+
+      const t = new Date(e.tsMs).toLocaleTimeString();
+      d.innerHTML = `<span class="t">[${t}]</span><span class="tag">${e.tag}</span> ${e.html}`;
+
+      feed.appendChild(d);
+    }
+  }
+
+  function updateFeedChips(){
+    feedAll.classList.toggle("on", state.feedMode === FEED_MODE_ALL);
+    feedShares.classList.toggle("on", state.feedMode === FEED_MODE_SHARES);
+    feedBlocks.classList.toggle("on", state.feedMode === FEED_MODE_BLOCKS);
+    feedPayouts.classList.toggle("on", state.feedMode === FEED_MODE_PAYOUTS);
+    feedMinerOnly.classList.toggle("on", !!state.feedMinerOnly);
+  }
+
+  // -------------------------------------------------------------------------
+  // UI updates
+  // -------------------------------------------------------------------------
+  function setConnected(ok){
+    state.connected = ok;
+    statusDot.className = "dot " + (ok ? "ok" : "bad");
+    statusText.textContent = ok ? "Connected ✓" : "Disconnected ✗ (retrying)";
+  }
+
+  function updateNetUi(){
+    const n = state.net;
+    netHeight.textContent = (n.height === null || n.height === undefined) ? "—" : fmtU128Like(n.height);
+    netHashrate.textContent = fmtHashrate(n.hashrate_hs);
+    netDifficulty.textContent = (n.difficulty === null || n.difficulty === undefined) ? "—" : fmtU128Like(n.difficulty);
+    netReward.textContent = fmtReward(n.reward);
+    netLastAge.textContent = fmtAgeSeconds(n.last_block_secs_ago);
+    netAvgBt.textContent = fmtAgeSeconds(n.avg_block_time_secs);
+    netLastHash.textContent = fmtHashTrunc(n.last_hash);
+  }
+
+  function updateBlocksChips(){
+    blocks1d.classList.toggle("on", state.blocksMode === BLOCKS_MODE_1D);
+    blocks7d.classList.toggle("on", state.blocksMode === BLOCKS_MODE_7D);
+    blocks30d.classList.toggle("on", state.blocksMode === BLOCKS_MODE_30D);
+
+    if(state.blocksMode === BLOCKS_MODE_1D){
+      blocksChartTitle.textContent = "Blocks per hour (24h)";
+    } else if(state.blocksMode === BLOCKS_MODE_7D){
+      blocksChartTitle.textContent = "Blocks per day (7d)";
+    } else {
+      blocksChartTitle.textContent = "Blocks per day (30d)";
+    }
+  }
+
+  function updateHrChips(){
+    hr1h.classList.toggle("on", state.hrMode === HR_MODE_1H);
+    hr6h.classList.toggle("on", state.hrMode === HR_MODE_6H);
+    hr24h.classList.toggle("on", state.hrMode === HR_MODE_24H);
+  }
+
+  function drawBarChart(ctx, canvas, labels, values, opts){
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(420, Math.floor(rect.width));
+    const h = Math.max(110, Math.floor(rect.height));
+
+    if(canvas.width !== Math.floor(w * dpr) || canvas.height !== Math.floor(h * dpr)){
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+    }
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.lineWidth = 1;
+    for(let i=1;i<=3;i++){
+      const y = Math.floor((h * i) / 4);
+      ctx.beginPath();
+      ctx.moveTo(10, y);
+      ctx.lineTo(w-10, y);
+      ctx.stroke();
+    }
+
+    const maxV = Math.max(1, ...values.map(v => Number(v) || 0));
+    const padL = 10;
+    const padR = 10;
+    const padT = 10;
+    const padB = 22;
+
+    const innerW = w - padL - padR;
+    const innerH = h - padT - padB;
+
+    const n = labels.length;
+    const barGap = (n <= 24) ? 4 : 3;
+    const barW = Math.max(2, Math.floor((innerW - (n-1)*barGap) / n));
+
+    for(let i=0; i<n; i++){
+      const v = Number(values[i] || 0);
+      const bh = Math.floor((v / maxV) * innerH);
+      const x = padL + i * (barW + barGap);
+      const y = padT + (innerH - bh);
+
+      ctx.fillStyle = "rgba(111,231,255,0.35)";
+      ctx.fillRect(x, y, barW, bh);
+
+      const showTick = (opts && typeof opts.tickEvery === "number")
+        ? (i === 0 || i === n-1 || (i % opts.tickEvery === 0))
+        : (i === 0 || i === n-1);
+
+      if(showTick){
+        ctx.fillStyle = "rgba(255,255,255,0.45)";
+        ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
+        ctx.fillText(labels[i], x, h - 6);
+      }
+    }
+
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
+    ctx.fillText(`max=${maxV}`, w - 62, 12);
+  }
+
+  function drawBlocksChart(){
+    if(state.blocksMode === BLOCKS_MODE_1D){
+      const labels = [];
+      const values = [];
+      for(let i=23; i>=0; i--){
+        const k = hourKeyFromNowHours(i);
+        const hh = k.slice(-2);
+        labels.push(hh);
+        values.push(Number(state.blocksByHour[k] || 0));
+      }
+      drawBarChart(blocksChartCtx, blocksChart, labels, values, { tickEvery: 3 });
+      return;
+    }
+
+    const days = (state.blocksMode === BLOCKS_MODE_7D) ? 7 : 30;
+    const labels = [];
+    const values = [];
+
+    for(let i=days-1; i>=0; i--){
+      const k = dayKeyFromNow(i);
+      labels.push(k.slice(5));
+      values.push(Number(state.blocksByDay[k] || 0));
+    }
+
+    const tickEvery = (days === 7) ? 1 : 7;
+    drawBarChart(blocksChartCtx, blocksChart, labels, values, { tickEvery });
+  }
+
+  function drawHashrateChart(){
+    const rect = hrChart.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(420, Math.floor(rect.width));
+    const h = Math.max(160, Math.floor(rect.height));
+
+    if(hrChart.width !== Math.floor(w * dpr) || hrChart.height !== Math.floor(h * dpr)){
+      hrChart.width = Math.floor(w * dpr);
+      hrChart.height = Math.floor(h * dpr);
+    }
+
+    hrChartCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    hrChartCtx.clearRect(0, 0, w, h);
+
+    hrChartCtx.strokeStyle = "rgba(255,255,255,0.06)";
+    hrChartCtx.lineWidth = 1;
+    for(let i=1;i<=4;i++){
+      const y = Math.floor((h * i) / 5);
+      hrChartCtx.beginPath();
+      hrChartCtx.moveTo(10, y);
+      hrChartCtx.lineTo(w-10, y);
+      hrChartCtx.stroke();
+    }
+
+    const now = Date.now();
+    let windowMs = 6 * 3600 * 1000;
+    if(state.hrMode === HR_MODE_1H) windowMs = 1 * 3600 * 1000;
+    if(state.hrMode === HR_MODE_24H) windowMs = 24 * 3600 * 1000;
+
+    const t0 = now - windowMs;
+    const pts = (state.hrSeries || []).filter(p => p.t >= t0 && p.t <= now);
+
+    if(state.hrMode === HR_MODE_1H) hrChartTitle.textContent = "Hashrate (last 1h)";
+    else if(state.hrMode === HR_MODE_6H) hrChartTitle.textContent = "Hashrate (last 6h)";
+    else hrChartTitle.textContent = "Hashrate (last 24h)";
+
+    if(pts.length < 2){
+      hrChartCtx.fillStyle = "rgba(255,255,255,0.55)";
+      hrChartCtx.font = "12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
+      hrChartCtx.fillText("No series yet (needs shares / time)", 14, 22);
+      return;
+    }
+
+    let minV = Infinity, maxV = -Infinity;
+    for(const p of pts){
+      if(p.v < minV) minV = p.v;
+      if(p.v > maxV) maxV = p.v;
+    }
+    if(!isFinite(minV) || !isFinite(maxV)) return;
+    if(maxV === minV) maxV = minV + 1;
+
+    const padL = 10;
+    const padR = 10;
+    const padT = 10;
+    const padB = 22;
+
+    const innerW = w - padL - padR;
+    const innerH = h - padT - padB;
+
+    function xFor(t){
+      return padL + ((t - t0) / windowMs) * innerW;
+    }
+    function yFor(v){
+      return padT + (1 - ((v - minV) / (maxV - minV))) * innerH;
+    }
+
+    hrChartCtx.strokeStyle = "rgba(76,255,155,0.75)";
+    hrChartCtx.lineWidth = 2;
+    hrChartCtx.beginPath();
+    hrChartCtx.moveTo(xFor(pts[0].t), yFor(pts[0].v));
+    for(let i=1; i<pts.length; i++){
+      hrChartCtx.lineTo(xFor(pts[i].t), yFor(pts[i].v));
+    }
+    hrChartCtx.stroke();
+
+    hrChartCtx.lineTo(xFor(pts[pts.length-1].t), padT + innerH);
+    hrChartCtx.lineTo(xFor(pts[0].t), padT + innerH);
+    hrChartCtx.closePath();
+    hrChartCtx.fillStyle = "rgba(76,255,155,0.10)";
+    hrChartCtx.fill();
+
+    hrChartCtx.fillStyle = "rgba(255,255,255,0.55)";
+    hrChartCtx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
+    hrChartCtx.fillText(`min=${fmtHashrate(minV)}`, 12, 12);
+    const maxStr = `max=${fmtHashrate(maxV)}`;
+    hrChartCtx.fillText(maxStr, Math.max(12, w - 12 - maxStr.length * 6), 12);
+  }
+
+  function updateKpis(){
+    kpiMiners.textContent = String(state.minersActive.size);
+    kpiAcc.textContent = String(state.sharesAccepted);
+    kpiRej.textContent = String(state.sharesRejected);
+    kpiBlocks.textContent = String(state.blocksFound);
+
+    const poolHr = computeHashrateFromTs(state.poolShareTimesMs);
+    kpiHr.textContent = fmtHashrate(poolHr);
+
+    snapLastPayout.textContent = state.lastPayoutHeight ?? "—";
+    snapLastPayoutTotal.textContent = fmtReward(state.lastPayoutTotalReward);
+    snapLastPayoutFee.textContent = fmtReward(state.lastPayoutPoolFee);
+
+    let netAtomic = null;
+    if(state.lastPayoutMinersNetAtomic !== null && state.lastPayoutMinersNetAtomic !== undefined){
+      try{ netAtomic = BigInt(String(state.lastPayoutMinersNetAtomic)); } catch { netAtomic = null; }
+    }
+    if(netAtomic === null){
+      netAtomic = rewardNetAtomic(state.lastPayoutTotalReward, state.lastPayoutPoolFee);
+    }
+    snapLastPayoutNet.textContent = (netAtomic === null) ? "—" : fmtReward(String(netAtomic));
+
+    snapLastPayoutMiners.textContent =
+      (state.lastPayoutMinersPaid === null || state.lastPayoutMinersPaid === undefined)
+        ? "—"
+        : String(state.lastPayoutMinersPaid);
+
+    snapTotalPaidMiners.textContent = fmtReward(state.totalPaidToMinersAtomic);
+
+    updateNetUi();
+    updateBlocksChips();
+    updateHrChips();
+    updateFeedChips();
+
+    drawBlocksChart();
+    drawHashrateChart();
+  }
+
+  function setMinerView(minerId){
+    let id = (minerId || "").trim();
+
+    if (id && !id.startsWith("Public:")) {
+      id = "Public: " + id;
+    }
+
+    if(!id){
+      mMiner.textContent = "—";
+      mConnected.textContent = "—";
+      mShares.textContent = "—";
+      mLastH.textContent = "—";
+      mHR.textContent = "—";
+
+      mPaid.textContent = "—";
+      mLastPayAmt.textContent = "—";
+      mLastPayH.textContent = "—";
+      mLastPayTs.textContent = "—";
+      mRate.textContent = "—";
+      mHR3.textContent = "—";
+      return;
+    }
+
+    const m = state.miners.get(id);
+    if(!m){
+      mMiner.textContent = id;
+      mConnected.textContent = "no (not seen)";
+      mShares.textContent = "0 / 0";
+      mLastH.textContent = "—";
+      mHR.textContent = "—";
+    } else {
+      mMiner.textContent = id;
+      mConnected.textContent = m.connectedSeen ? "yes" : "no";
+      mShares.textContent = `${String(m.acc)} / ${String(m.rej)}`;
+      mLastH.textContent = (m.lastHeight !== null && m.lastHeight !== undefined) ? String(m.lastHeight) : "—";
+
+      const minerHr = computeHashrateFromTs(m.shareTimesMs);
+      mHR.textContent = fmtHashrate(minerHr);
+    }
+
+    const paidStr = (state.minerPaidTotals && state.minerPaidTotals[id]) ? state.minerPaidTotals[id] : "0";
+    mPaid.textContent = fmtReward(paidStr);
+
+    const lp = (state.minerLastPayout && state.minerLastPayout[id]) ? state.minerLastPayout[id] : null;
+    if(lp){
+      mLastPayAmt.textContent = fmtReward(lp.amount);
+      mLastPayH.textContent = (lp.height === null || lp.height === undefined) ? "—" : String(lp.height);
+      mLastPayTs.textContent = fmtUnixSec(lp.ts);
+    } else {
+      mLastPayAmt.textContent = "—";
+      mLastPayH.textContent = "—";
+      mLastPayTs.textContent = "—";
+    }
+
+    const times = (m && Array.isArray(m.shareTimesMs)) ? m.shareTimesMs : [];
+    const c1 = countWithinWindowMs(times, 60);
+    const c15 = countWithinWindowMs(times, 15*60);
+    const c24 = countWithinWindowMs(times, 24*60*60);
+
+    mRate.textContent = `${c1}/1m  ${c15}/15m  ${c24}/24h`;
+
+    const r1 = ratePerSec(c1, 60);
+    const r15 = ratePerSec(c15, 15*60);
+    const r24 = ratePerSec(c24, 24*60*60);
+
+    const h1 = r1 * SHARE_DIFF;
+    const h15 = r15 * SHARE_DIFF;
+    const h24 = r24 * SHARE_DIFF;
+    mHR3.textContent = `${fmtHashrate(h1)}  ${fmtHashrate(h15)}  ${fmtHashrate(h24)}`;
+  }
+
+  // -------------------------------------------------------------------------
+  // Dedupe + persisted counters
+  // -------------------------------------------------------------------------
+  function addSeenKey(setObj, key){
+    if(setObj.has(key)) return false;
+    setObj.add(key);
+    if(setObj.size > 2048){
+      const arr = Array.from(setObj);
+      const trimmed = arr.slice(arr.length - 2048);
+      setObj.clear();
+      for(const k of trimmed) setObj.add(k);
+    }
+    return true;
+  }
+
+  function bumpBlocksToday(){
+    const k = todayKey();
+    if(!state.blocksByDay[k]) state.blocksByDay[k] = 0;
+    state.blocksByDay[k] += 1;
+    pruneBlocksByDay();
+  }
+
+  function bumpBlocksThisHour(){
+    const d = new Date();
+    d.setMinutes(0,0,0);
+    const k = hourKey(d);
+    if(!state.blocksByHour[k]) state.blocksByHour[k] = 0;
+    state.blocksByHour[k] += 1;
+    pruneBlocksByHour();
+  }
+
+  // -------------------------------------------------------------------------
+  // Hashrate series sampling
+  // -------------------------------------------------------------------------
+  function sampleHashrateSeries(){
+    const now = Date.now();
+    if(state.lastHrSampleMs && (now - state.lastHrSampleMs) < HR_SAMPLE_MS) return;
+
+    const hs = computeHashrateFromTs(state.poolShareTimesMs);
+    if(hs === null || hs === undefined) return;
+
+    state.lastHrSampleMs = now;
+    state.hrSeries.push({ t: now, v: Number(hs) });
+    if(state.hrSeries.length > 4000){
+      state.hrSeries.splice(0, state.hrSeries.length - 4000);
+    }
+
+    const keepT = now - (48 * 3600 * 1000);
+    while(state.hrSeries.length > 0 && state.hrSeries[0].t < keepT){
+      state.hrSeries.shift();
+    }
+
+    savePersisted();
+  }
+
+  // -------------------------------------------------------------------------
+  // Collapsible Miner Check
+  // -------------------------------------------------------------------------
+  function applyMinerCollapsed(){
+    minerCard.classList.toggle("collapsed", !!state.minerCollapsed);
+    minerCollapseBtn.textContent = state.minerCollapsed ? "Expand" : "Collapse";
+
+    setTimeout(() => {
+      drawBlocksChart();
+      drawHashrateChart();
+    }, 0);
+  }
+
+  // -------------------------------------------------------------------------
+  // Event ingestion
+  // -------------------------------------------------------------------------
+  function ingestEvent(ev){
+    state.lastEvtMs = Date.now();
+    lastEvt.textContent = fmtTime(state.lastEvtMs);
+
+    switch(ev.type){
+      case "snapshot": {
+        // WS hello snapshot: { type:"snapshot", data: PoolSnapshot }
+        applySnapshot(ev.data);
+        break;
+      }
+
+      case "MinerConnected": {
+        const miner = String(ev.miner ?? "").trim();
+        const ip = String(ev.ip ?? "").trim();
+        if(miner){
+          state.minersActive.add(miner);
+          const m = ensureMiner(miner);
+          m.connectedSeen = true;
+          m.ip = ip || m.ip;
+          m.lastSeenMs = Date.now();
+        }
+
+        pushFeedEvent({
+          tsMs: Date.now(),
+          typeClass: "miner",
+          cat: FEED_MODE_ALL,
+          tag: "Miner",
+          html: `Connected: ${minerSpan(miner, "accent-cyan")} <span class="t">ip=${escapeHtml(ip || "?")}</span>`,
+          miners: miner ? [miner] : [],
+        });
+
+        refreshMinerPicker();
+        break;
+      }
+
+      case "MinerDisconnected": {
+        const miner = String(ev.miner ?? "").trim();
+        if(miner){
+          state.minersActive.delete(miner);
+          const m = ensureMiner(miner);
+          m.lastSeenMs = Date.now();
+        }
+
+        pushFeedEvent({
+          tsMs: Date.now(),
+          typeClass: "miner",
+          cat: FEED_MODE_ALL,
+          tag: "Miner",
+          html: `Disconnected: ${minerSpan(miner, "accent-red")}`,
+          miners: miner ? [miner] : [],
+        });
+
+        refreshMinerPicker();
+        break;
+      }
+
+      case "ShareAccepted": {
+        const nowMs = Date.now();
+
+        const miner = String(ev.miner ?? "").trim();
+        const height = (ev.height !== undefined && ev.height !== null) ? Number(ev.height) : null;
+        const workUnits = ev.work_units;
+        const workTotal = ev.work_total;
+
+        state.sharesAccepted += 1;
+        pushTs(state.poolShareTimesMs, nowMs);
+
+        sampleHashrateSeries();
+        savePersisted();
+
+        if(miner){
+          state.minersActive.add(miner);
+          const m = ensureMiner(miner);
+
+          m.connectedSeen = true;
+          m.acc += 1;
+          m.lastHeight = height ?? m.lastHeight;
+          m.lastSeenMs = nowMs;
+          pushTs(m.shareTimesMs, nowMs);
+
+          if(workTotal !== undefined && workTotal !== null){
+            m.workTotal = String(workTotal);
+          } else if(workUnits !== undefined && workUnits !== null){
+            try{
+              const a = BigInt(m.workTotal);
+              const b = BigInt(String(workUnits));
+              m.workTotal = String(a + b);
+            } catch {}
+          }
+        }
+
+        pushFeedEvent({
+          tsMs: Date.now(),
+          typeClass: "share",
+          cat: FEED_MODE_SHARES,
+          tag: "Share",
+          html:
+            `Accepted: ${minerSpan(miner, "accent-green")} ` +
+            `<span class="t">h=${escapeHtml(height ?? "?")}</span> ` +
+            `<span class="t">work=${escapeHtml(fmtU128Like(workUnits ?? "—"))}</span>`,
+          miners: miner ? [miner] : [],
+        });
+
+        let cur = (minerInput.value || "").trim();
+        if (cur && !cur.startsWith("Public:")) {
+          cur = "Public: " + cur;
+        }
+        if (cur === miner){
+          setMinerView(miner);
+        }
+
+        break;
+      }
+
+      case "ShareRejected": {
+        const miner = String(ev.miner ?? "").trim();
+        const reason = String(ev.reason ?? "").trim();
+
+        state.sharesRejected += 1;
+        savePersisted();
+
+        if(miner){
+          const m = ensureMiner(miner);
+          m.connectedSeen = true;
+          m.rej += 1;
+          m.lastSeenMs = Date.now();
+        }
+
+        pushFeedEvent({
+          tsMs: Date.now(),
+          typeClass: "reject",
+          cat: FEED_MODE_SHARES,
+          tag: "Reject",
+          html: `${minerSpan(miner, "accent-red")} <span class="t">${escapeHtml(reason || "")}</span>`,
+          miners: miner ? [miner] : [],
+        });
+
+        refreshMinerPicker();
+        break;
+      }
+
+      case "BlockFound": {
+        const height = (ev.height !== undefined && ev.height !== null) ? Number(ev.height) : null;
+        const reward = (ev.reward !== undefined && ev.reward !== null) ? ev.reward : null;
+
+        // include full block hash + explorer href
+        let bh = String(ev.hash ?? "").trim();
+
+        // unwrap "Some(Hash: xxx)" format
+        const match = bh.match(/Hash:\s*([^)]+)/);
+        if (match && match[1]) {
+          bh = match[1].trim();
+        }
+
+        // also handle plain "Hash: xxx"
+        if (bh.startsWith("Hash:")) {
+          bh = bh.replace(/^Hash:\s*/, "");
+        }
+
+        const bhUrl = explorerBlockUrl(bh);
+        const bhLink = bh ? explorerLink(bhUrl, bh) : "—";
+
+        const blockKey = `block:${height ?? "?"}`;
+        const isNew = addSeenKey(state.seenBlockKeys, blockKey);
+        if(isNew){
+          state.blocksFound += 1;
+          bumpBlocksToday();
+          bumpBlocksThisHour();
+          savePersisted();
+        }
+
+        pushFeedEvent({
+          tsMs: Date.now(),
+          typeClass: "block",
+          cat: FEED_MODE_BLOCKS,
+          tag: "BLOCK",
+          html:
+            `Found: <span class="accent-yellow">height=${escapeHtml(height ?? "?")}</span> ` +
+            `<span class="t">hash=${bhLink}</span> ` +
+            `<span class="t">reward=${escapeHtml(fmtReward(reward))}</span>`,
+          miners: [],
+        });
+
+        break;
+      }
+
+      case "PayoutComplete": {
+        const height = (ev.height !== undefined && ev.height !== null) ? Number(ev.height) : null;
+        const minersPaid = (ev.miners_paid !== undefined && ev.miners_paid !== null) ? Number(ev.miners_paid) : null;
+
+        const totalReward = (ev.total_reward !== undefined && ev.total_reward !== null) ? ev.total_reward : null;
+        const poolFee = (ev.pool_fee !== undefined && ev.pool_fee !== null) ? ev.pool_fee : null;
+
+        const payouts = Array.isArray(ev.payouts) ? ev.payouts : null;
+        const minersNetFromPayouts = sumPayoutsAtomic(payouts);
+
+        // txid link
+        let txid = String(ev.txid ?? "").trim();
+
+        // remove "Hash:" prefix if present
+        if (txid.startsWith("Hash:")) {
+          txid = txid.replace(/^Hash:\s*/, "");
+        }
+
+        const txUrl = explorerTxUrl(txid);
+        const txLink = txid ? explorerLink(txUrl, txid) : "";
+
+        const payoutKey =
+          `payout:${height ?? "?"}:${String(totalReward ?? "—")}:${String(poolFee ?? "—")}:${String(minersPaid ?? "—")}`;
+
+        const isNew = addSeenKey(state.seenPayoutKeys, payoutKey);
+
+        state.lastPayoutHeight = height ?? state.lastPayoutHeight;
+        state.lastPayoutMinersPaid = minersPaid ?? state.lastPayoutMinersPaid;
+        state.lastPayoutTotalReward = totalReward ?? state.lastPayoutTotalReward;
+        state.lastPayoutPoolFee = poolFee ?? state.lastPayoutPoolFee;
+
+        if(minersNetFromPayouts !== null){
+          state.lastPayoutMinersNetAtomic = String(minersNetFromPayouts);
+        } else {
+          state.lastPayoutMinersNetAtomic = null;
+        }
+
+        if(isNew){
+          if(minersNetFromPayouts !== null){
+            state.totalPaidToMinersAtomic = addU128Str(state.totalPaidToMinersAtomic, String(minersNetFromPayouts));
+
+            for(const p of payouts || []){
+              if(!p) continue;
+              const miner = String(p.miner ?? "").trim();
+              if(!miner) continue;
+              const amt = String(p.amount ?? "0");
+              state.minerPaidTotals[miner] = addU128Str(state.minerPaidTotals[miner] || "0", amt);
+              state.minerLastPayout[miner] = { amount: amt, height: height ?? null, ts: (ev.timestamp ?? null) };
+            }
+          } else {
+            const net = rewardNetAtomic(totalReward, poolFee);
+            if(net !== null){
+              state.totalPaidToMinersAtomic = addU128Str(state.totalPaidToMinersAtomic, String(net));
+            }
+          }
+        }
+
+        savePersisted();
+
+        const netShown = (minersNetFromPayouts !== null)
+          ? fmtReward(String(minersNetFromPayouts))
+          : ((rewardNetAtomic(totalReward, poolFee) === null) ? "—" : fmtReward(String(rewardNetAtomic(totalReward, poolFee))));
+
+        // Cyan summary line (+ txid link)
+        pushFeedEvent({
+          tsMs: Date.now(),
+          typeClass: "payout",
+          cat: FEED_MODE_PAYOUTS,
+          tag: "Payout",
+          html:
+            `Complete: <span class="accent-cyan">block=${escapeHtml(height ?? "?")}</span>` +
+            ` <span class="t">miners=${escapeHtml(minersPaid ?? "?")}</span>` +
+            ` <span class="t">total=${escapeHtml(fmtReward(totalReward))}</span>` +
+            ` <span class="t">net=${escapeHtml(netShown)}</span>` +
+            ` <span class="t">fee=${escapeHtml(fmtReward(poolFee))}</span>` +
+            (txid ? ` <span class="t">tx=${txLink}</span>` : ``) +
+            (isNew ? `` : ` <span class="t">(dup)</span>`),
+          miners: [],
+        });
+
+        // Magenta per-miner payout lines (+ txid link)
+        if(Array.isArray(payouts) && payouts.length){
+          for(const p of payouts){
+            if(!p) continue;
+            const miner = String(p.miner ?? "").trim();
+            if(!miner) continue;
+            const amt = String(p.amount ?? "0");
+
+            pushFeedEvent({
+              tsMs: Date.now(),
+              typeClass: "minerpay",
+              cat: FEED_MODE_PAYOUTS,
+              tag: "Paid",
+              html:
+                `${minerSpan(miner, "accent-magenta")} ` +
+                `<span class="t">amt=${escapeHtml(fmtReward(amt))}</span> ` +
+                `<span class="t">h=${escapeHtml(height ?? "?")}</span>` +
+                (txid ? ` <span class="t">tx=${txLink}</span>` : ``),
+              miners: [miner],
+            });
+          }
+        }
+
+        break;
+      }
+
+      case "NetworkStats": {
+        const hashrate = (ev.hashrate_hs !== undefined && ev.hashrate_hs !== null) ? Number(ev.hashrate_hs) : null;
+        const difficulty = (ev.difficulty !== undefined && ev.difficulty !== null) ? Number(ev.difficulty) : null;
+        const height = (ev.height !== undefined && ev.height !== null) ? Number(ev.height) : null;
+        const reward = (ev.reward !== undefined && ev.reward !== null) ? ev.reward : null;
+        const lastHash = String(ev.last_hash ?? "").trim();
+        const age = (ev.last_block_secs_ago !== undefined && ev.last_block_secs_ago !== null) ? Number(ev.last_block_secs_ago) : null;
+        const avgBt = (ev.avg_block_time_secs !== undefined && ev.avg_block_time_secs !== null) ? Number(ev.avg_block_time_secs) : null;
+
+        state.net.hashrate_hs = isFinite(hashrate) ? hashrate : state.net.hashrate_hs;
+        state.net.difficulty = isFinite(difficulty) ? difficulty : state.net.difficulty;
+        state.net.height = isFinite(height) ? height : state.net.height;
+        state.net.reward = reward ?? state.net.reward;
+        state.net.last_hash = lastHash || state.net.last_hash;
+        state.net.last_block_secs_ago = isFinite(age) ? age : state.net.last_block_secs_ago;
+        state.net.avg_block_time_secs = isFinite(avgBt) ? avgBt : state.net.avg_block_time_secs;
+        state.net.last_update_ms = Date.now();
+        break;
+      }
+
+      case "connected": {
+        pushFeedEvent({
+          tsMs: Date.now(),
+          typeClass: "miner",
+          cat: FEED_MODE_ALL,
+          tag: "System",
+          html: `<span class="accent-cyan">${escapeHtml(ev.message ?? "WS connected")}</span>`,
+          miners: [],
+        });
+        break;
+      }
+
+      default:
+        break;
+    }
+
+    updateKpis();
+
+    const cur = (minerInput.value || "").trim();
+    if(cur){
+      setMinerView(cur);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // WebSocket
+  // -------------------------------------------------------------------------
+  function connectWs(){
+    const host = window.location.host;
+
+    if(!host){
+      setConnected(false);
+      pushFeedEvent({
+        tsMs: Date.now(),
+        typeClass: "reject",
+        cat: FEED_MODE_ALL,
+        tag: "System",
+        html: "Opened as file:// — open the dashboard via http://&lt;host&gt;:&lt;port&gt;/ (stats server).",
+        miners: [],
+      });
+      return;
+    }
+
+    const proto = (window.location.protocol === "https:") ? "wss://" : "ws://";
+    const wsUrl = `${proto}${host}/ws`;
+
+    let ws;
+    try{
+      ws = new WebSocket(wsUrl);
+    } catch (e){
+      setConnected(false);
+      pushFeedEvent({
+        tsMs: Date.now(),
+        typeClass: "reject",
+        cat: FEED_MODE_ALL,
+        tag: "System",
+        html: `WebSocket init failed: ${escapeHtml(String(e))}`,
+        miners: [],
+      });
+      setTimeout(connectWs, 2500);
+      return;
+    }
+
+    ws.onopen = () => {
+      setConnected(true);
+      // REST hydration on connect (best-effort; WS may also send snapshot)
+      fetchSnapshot();
+    };
+
+    ws.onclose = () => {
+      setConnected(false);
+      setTimeout(connectWs, 2000);
+    };
+
+    ws.onerror = () => {
+      setConnected(false);
+    };
+
+    ws.onmessage = (msg) => {
+      try{
+        const ev = JSON.parse(msg.data);
+        ingestEvent(ev);
+      } catch {}
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Controls
+  // -------------------------------------------------------------------------
+  minerBtn.addEventListener("click", () => {
+    const v = (minerInput.value || "").trim();
+    setMinerView(v);
+    renderFeed();
+  });
+
+  minerInput.addEventListener("keydown", (e) => {
+    if(e.key === "Enter"){
+      const v = (minerInput.value || "").trim();
+      setMinerView(v);
+      renderFeed();
+    }
+  });
+
+  minerClear.addEventListener("click", () => {
+    minerInput.value = "";
+    setMinerView("");
+    renderFeed();
+  });
+
+  minerCollapseBtn.addEventListener("click", () => {
+    state.minerCollapsed = !state.minerCollapsed;
+    saveUiPrefs();
+    applyMinerCollapsed();
+  });
+
+  // Click any miner address in the live feed to open Miner Check
+  feed.addEventListener("click", (e) => {
+    const t = e.target && e.target.closest ? e.target.closest(".minerlink") : null;
+    if(!t) return;
+
+    const miner = String(t.getAttribute("data-miner") || "").trim();
+    if(!miner) return;
+
+    minerInput.value = miner;
+
+    if(state.minerCollapsed){
+      state.minerCollapsed = false;
+      saveUiPrefs();
+      applyMinerCollapsed();
+    }
+
+    setMinerView(miner);
+    renderFeed();
+  });
+
+  blocks1d.addEventListener("click", () => {
+    state.blocksMode = BLOCKS_MODE_1D;
+    savePersisted();
+    updateKpis();
+  });
+  blocks7d.addEventListener("click", () => {
+    state.blocksMode = BLOCKS_MODE_7D;
+    savePersisted();
+    updateKpis();
+  });
+  blocks30d.addEventListener("click", () => {
+    state.blocksMode = BLOCKS_MODE_30D;
+    savePersisted();
+    updateKpis();
+  });
+
+  hr1h.addEventListener("click", () => {
+    state.hrMode = HR_MODE_1H;
+    savePersisted();
+    updateKpis();
+  });
+  hr6h.addEventListener("click", () => {
+    state.hrMode = HR_MODE_6H;
+    savePersisted();
+    updateKpis();
+  });
+  hr24h.addEventListener("click", () => {
+    state.hrMode = HR_MODE_24H;
+    savePersisted();
+    updateKpis();
+  });
+
+  feedAll.addEventListener("click", () => {
+    state.feedMode = FEED_MODE_ALL;
+    updateKpis();
+    renderFeed();
+  });
+  feedShares.addEventListener("click", () => {
+    state.feedMode = FEED_MODE_SHARES;
+    updateKpis();
+    renderFeed();
+  });
+  feedBlocks.addEventListener("click", () => {
+    state.feedMode = FEED_MODE_BLOCKS;
+    updateKpis();
+    renderFeed();
+  });
+  feedPayouts.addEventListener("click", () => {
+    state.feedMode = FEED_MODE_PAYOUTS;
+    updateKpis();
+    renderFeed();
+  });
+  feedMinerOnly.addEventListener("click", () => {
+    state.feedMinerOnly = !state.feedMinerOnly;
+    updateKpis();
+    renderFeed();
+  });
+
+  window.addEventListener("resize", () => {
+    drawBlocksChart();
+    drawHashrateChart();
+  });
+
+  // -------------------------------------------------------------------------
+  // Boot
+  // -------------------------------------------------------------------------
+  loadUiPrefs();
+  loadPersisted();
+  pruneBlocksByDay();
+  pruneBlocksByHour();
+
+  setConnected(false);
+  setMinerView("");
+  applyMinerCollapsed();
+  updateKpis();
+  renderFeed();
+
+  // Initial REST snapshot hydration (best-effort)
+  fetchSnapshot();
+
+  // Periodic snapshot hydration (best-effort)
+  setInterval(() => {
+    fetchSnapshot();
+  }, SNAPSHOT_POLL_MS);
+
+  setInterval(() => {
+    sampleHashrateSeries();
+    drawHashrateChart();
+  }, HR_SAMPLE_MS);
+
+  connectWs();
+})();
+</script>
+
+</body>
+</html>
+<!-- =========================================================================
+File: pool_dashboard.html
+Location: snap-coin-pool/static/pool_dashboard.html
+Version: 1.4.7-compact.7
+Updated: 2026-02-12
+========================================================================  -->
