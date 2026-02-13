@@ -298,7 +298,7 @@ Changes from v1.4.7-compact.7:
     #blocks-chart{ height: 95px; }
 
     /* make hashrate chart bigger than blocks */
-    #hashrate-chart{ height: 110px; }
+    #hashrate-chart{ height: 150px; }
 
     .controls{
       display:flex;
@@ -631,9 +631,7 @@ Changes from v1.4.7-compact.7:
                   </div>
                 </div>
                 <canvas id="blocks-chart" width="1200" height="260"></canvas>
-                <div class="muted" style="margin-top:10px;">
-                  Counts are persisted in this browser via localStorage (best-effort dedupe by height).
-                </div>
+                
               </div>
             </div>
           </div>
@@ -651,9 +649,7 @@ Changes from v1.4.7-compact.7:
                   </div>
                 </div>
                 <canvas id="hashrate-chart" width="1200" height="420"></canvas>
-                <div class="muted" style="margin-top:10px;">
-                  Samples are taken in-browser from share timing (no backend series yet). Persisted via localStorage (best-effort).
-                </div>
+                
               </div>
             </div>
           </div>
