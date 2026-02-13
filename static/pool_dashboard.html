@@ -614,6 +614,12 @@ Changes from v1.4.7-compact.7:
                   <div class="left">Total paid to miners</div>
                   <div class="right" id="snap-total-paid-miners">—</div>
                 </div>
+
+                <div class="row">
+                  <div class="left">Pool difficulty (fixed)</div>
+                  <div class="right" id="snap-pool-diff-fixed">—</div>
+                </div>
+
               </div>
             </div>
           </div>
@@ -940,6 +946,11 @@ Changes from v1.4.7-compact.7:
     return undefined;
   }
 
+  function formatDifficulty(num) {
+    if (!num || !isFinite(num) || num <= 0) return "—";
+    return num.toLocaleString();
+  }
+
   function applySnapshot(snap){
     if(!snap || typeof snap !== "object") return;
 
@@ -995,6 +1006,14 @@ Changes from v1.4.7-compact.7:
     if(lp_mp !== undefined && isFinite(Number(lp_mp)))  state.lastPayoutMinersPaid = Number(lp_mp);
     if(lp_tot !== undefined) state.lastPayoutTotalReward = lp_tot;
     if(lp_fee !== undefined) state.lastPayoutPoolFee = lp_fee;
+
+    const elDiff = document.getElementById("snap-pool-diff-fixed");
+    if (elDiff) {
+    const diffNum = Number(snap.pool_difficulty_fixed_num);
+    elDiff.textContent = (diffNum > 0) ? formatDifficulty(diffNum) : "—";
+    elDiff.title = snap.pool_difficulty_fixed || "";  // hex on hover
+}
+
 
     const paidT = pick(snap, ["totalPaidToMinersAtomic","total_paid_to_miners_atomic","total_paid_to_miners"]);
     if(paidT !== undefined && paidT !== null){

@@ -1,7 +1,7 @@
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.0.2-snapshot-ledger.3
+// Version: 1.0.4-snapshot-ledger.1
 //
 // Description: Server-side shared pool state (snapshot hydration) + lightweight
 //              disk persistence (no DB).
@@ -20,11 +20,16 @@
 //   - Daily buckets are bounded (default 30 days).
 //   - Uses an internal UTC day formatter (civil_from_days) to avoid adding chrono.
 //
-// CHANGELOG (v1.0.2-snapshot-ledger.3):
-//   - Completely remove NetworkStats from persistence:
-//       * NetworkStats are NOT written into snapshot fields.
-//       * NetworkStats are NOT stored in recent_events ring.
-//       * Existing loaded recent_events are filtered to remove NetworkStats.
+// CHANGELOG (v1.0.4-snapshot-ledger.1):
+//   - Add numeric "pool_difficulty_fixed_num" to PoolSnapshot:
+//       * Derived from env POOL_DIFFICULTY target bytes (pool job fixed target).
+//       * Computed as: difficulty = MAX_TARGET / TARGET (BigUint).
+//       * Stored as u64 (clamped) for easy frontend formatting.
+//   - Keep existing "pool_difficulty_fixed" (short hex target) for debugging.
+//   - Ensure dotenv is loaded inside new_from_env() so POOL_DIFFICULTY is available
+//     even when PoolState is constructed before other modules call dotenvy::dotenv().
+//   - Preserve all existing behavior:
+//       * NetworkStats hard-ignored (not persisted, not stored in recent events).
 // ============================================================================
 
 use std::{
@@ -39,10 +44,48 @@ use tokio::sync::Mutex;
 
 use crate::pool_stats_server::PoolEvent;
 
+// Needed to compute numeric difficulty from 32-byte target.
+use num_bigint::BigUint;
+
 const DEFAULT_STATE_FILE: &str = "pool_state.json";
 const DEFAULT_LEDGER_DIR: &str = ".";
 const DEFAULT_RECENT_EVENTS: usize = 120;
 const DEFAULT_DAILY_DAYS: usize = 30;
+
+// ── Env parsing helpers ─────────────────────────────────────────────────────
+
+/// POOL_DIFFICULTY is stored in .env as a JSON array of 32 bytes:
+///   POOL_DIFFICULTY=[0,0,255,...]
+///
+/// This struct exists to make parsing/validation explicit.
+#[derive(Clone, Debug, Deserialize)]
+struct EnvPoolDifficulty {
+    #[serde(with = "serde_bytes_32")]
+    bytes: [u8; 32],
+}
+
+// Deserialize a JSON array of u8 into [u8; 32].
+mod serde_bytes_32 {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Vec::<u8>::deserialize(deserializer)?;
+        if v.len() != 32 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 32 bytes, got {}",
+                v.len()
+            )));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&v);
+        Ok(out)
+    }
+}
+
+// ── Snapshot types ──────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct DailyBucket {
@@ -73,6 +116,15 @@ pub struct PoolSnapshot {
     pub last_block: LastBlock,
     pub daily_buckets: Vec<DailyBucket>,
     pub recent_events: Vec<PoolEvent>,
+
+    /// Fixed pool difficulty target display (short hex), derived from env POOL_DIFFICULTY.
+    #[serde(default)]
+    pub pool_difficulty_fixed: String,
+
+    /// Fixed pool "difficulty number" derived from the target (human-friendly numeric).
+    /// Computed as: MAX_TARGET / TARGET, clamped to u64.
+    #[serde(default)]
+    pub pool_difficulty_fixed_num: u64,
 }
 
 #[derive(Debug)]
@@ -95,10 +147,14 @@ impl PoolState {
     /// Create PoolState, loading an existing snapshot file if present.
     ///
     /// Env vars:
-    ///   - POOL_STATE_FILE   (default "pool_state.json")
-    ///   - POOL_LEDGER_DIR   (default ".")
-    ///   - POOL_LEDGER_ENABLE ("1" default on; set "0" to disable)
+    ///   - POOL_STATE_FILE     (default "pool_state.json")
+    ///   - POOL_LEDGER_DIR     (default ".")
+    ///   - POOL_LEDGER_ENABLE  ("1" default on; set "0" to disable)
+    ///   - POOL_DIFFICULTY     (JSON [u8;32] array; pool fixed target)
     pub async fn new_from_env() -> Self {
+        // IMPORTANT: ensure .env is loaded here (PoolState is constructed early).
+        let _ = dotenvy::dotenv();
+
         let state_file =
             std::env::var("POOL_STATE_FILE").unwrap_or_else(|_| DEFAULT_STATE_FILE.to_string());
         let ledger_dir =
@@ -122,6 +178,17 @@ impl PoolState {
 
         // Ensure generated_at updates at startup.
         snapshot.generated_at = now_ts();
+
+        // NEW: ensure fixed pool difficulty fields are populated from env (best-effort).
+        // We fill if missing/empty so existing persisted state doesn't fight config.
+        if snapshot.pool_difficulty_fixed.trim().is_empty() {
+            snapshot.pool_difficulty_fixed =
+                read_pool_difficulty_fixed_hex_from_env().unwrap_or_else(|| "-".to_string());
+        }
+        if snapshot.pool_difficulty_fixed_num == 0 {
+            snapshot.pool_difficulty_fixed_num =
+                compute_fixed_difficulty_u64_from_env().unwrap_or(0);
+        }
 
         // Seed ring buffer from loaded snapshot (filtered).
         let mut recent_events = VecDeque::with_capacity(DEFAULT_RECENT_EVENTS);
@@ -195,11 +262,8 @@ impl PoolState {
                 timestamp,
                 ..
             } => {
-                g.snapshot.totals.blocks_found = g
-                    .snapshot
-                    .totals
-                    .blocks_found
-                    .saturating_add(1);
+                g.snapshot.totals.blocks_found =
+                    g.snapshot.totals.blocks_found.saturating_add(1);
                 g.snapshot.last_block.height = *height;
                 g.snapshot.last_block.hash = hash.clone();
                 g.snapshot.last_block.timestamp = *timestamp;
@@ -354,6 +418,65 @@ fn append_ledger_line(ledger_dir: &Path, ts: u64, event: &PoolEvent) -> anyhow::
     Ok(())
 }
 
+fn parse_pool_difficulty_target_from_env() -> Option<[u8; 32]> {
+    let s = std::env::var("POOL_DIFFICULTY").ok()?;
+    // Wrap the raw JSON array into a struct JSON so serde can validate length.
+    let env: EnvPoolDifficulty = serde_json::from_str(&format!(r#"{{"bytes":{}}}"#, s)).ok()?;
+    Some(env.bytes)
+}
+
+fn read_pool_difficulty_fixed_hex_from_env() -> Option<String> {
+    let bytes = parse_pool_difficulty_target_from_env()?;
+    let full = bytes_to_hex_0x(&bytes);
+    Some(short_hex(&full))
+}
+
+fn compute_fixed_difficulty_u64_from_env() -> Option<u64> {
+    let bytes = parse_pool_difficulty_target_from_env()?;
+
+    let target = BigUint::from_bytes_be(&bytes);
+    if target == BigUint::from(0u32) {
+        return Some(0);
+    }
+
+    let max_target = BigUint::from_bytes_be(&[0xFFu8; 32]);
+    let diff = max_target / target;
+
+    Some(biguint_to_u64_clamped(&diff))
+}
+
+fn biguint_to_u64_clamped(v: &BigUint) -> u64 {
+    let bytes = v.to_bytes_be();
+    if bytes.len() <= 8 {
+        let mut buf = [0u8; 8];
+        buf[8 - bytes.len()..].copy_from_slice(&bytes);
+        u64::from_be_bytes(buf)
+    } else {
+        u64::MAX
+    }
+}
+
+fn bytes_to_hex_0x(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(2 + 64);
+    out.push_str("0x");
+    for &b in bytes.iter() {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn short_hex(hex0x: &str) -> String {
+    // Stable shortening: "0x" + 12 hex + "…" + last 10 hex
+    if hex0x.len() >= 2 + 64 {
+        let head = &hex0x[..2 + 12];
+        let tail = &hex0x[hex0x.len().saturating_sub(10)..];
+        return format!("{}…{}", head, tail);
+    }
+    hex0x.to_string()
+}
+
 fn now_ts() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -389,6 +512,6 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.0.2-snapshot-ledger.3
+// Version: 1.0.4-snapshot-ledger.1
 // Updated: 2026-02-12
 // ============================================================================
