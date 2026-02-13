@@ -4,10 +4,15 @@ Location: snap-coin-pool/static/pool_dashboard.html
 Version: 1.4.9-compact.9
 
 Changes from v1.4.8-compact.8:
-  - Fix snapshot recent_events replay reliability:
-      * Replay snapshot feed ONLY ONCE per page load (prevents 10s poll from wiping feed).
-      * Never clear existing feed unless we successfully ingest at least 1 event.
-      * Keep all layout/CSS/behavior the same otherwise.
+  - FIX: Block and Payout events now persist in Live Event Feed.
+      * Root cause: applySnapshot() was called every 10s by the snapshot
+        poll interval. Each call wiped state.feedEvents and replayed
+        snap.recent_events, destroying any live WS feed entries (blocks,
+        payouts) that arrived between polls.
+      * Added state.initialSnapshotApplied flag (default false).
+      * recent_events replay + feedEvents wipe now ONLY runs when
+        initialSnapshotApplied is false (first load). Subsequent snapshot
+        polls update KPIs/network/payout stats without touching the feed.
   - No other layout/logic changes.
 ========================================================================  -->
 <!DOCTYPE html>
@@ -52,20 +57,19 @@ Changes from v1.4.8-compact.8:
       color: var(--text);
       font-family: var(--sans);
       height: 100vh;
-      overflow: hidden; /* fit page without scrolling */
+      overflow: hidden;
     }
 
     .wrap{
       max-width: 1920px;
       margin: 0 auto;
-      padding: 14px 18px 16px 18px; /* tighter to reclaim space */
+      padding: 14px 18px 16px 18px;
       height: 100vh;
-      overflow: hidden; /* prevent page scroll; internal panels handle overflow */
+      overflow: hidden;
       display:flex;
       flex-direction:column;
     }
 
-    /* Compact status (no pills) */
     .statuswrap{
       display:flex;
       align-items:center;
@@ -98,13 +102,12 @@ Changes from v1.4.8-compact.8:
     .statuskv .k{ color: rgba(255,255,255,0.45); margin-right: 6px; }
     .statuskv .v{ color: rgba(255,255,255,0.90); font-weight: 800; }
 
-    /* Main page grid: left=overview, right=miner/feed */
     .grid{
       display:grid;
       grid-template-columns: 1.35fr 0.95fr;
       gap: 18px;
-      flex: 1 1 auto;          /* fill remaining viewport */
-      min-height: 0;           /* allow children to shrink for internal scrolling */
+      flex: 1 1 auto;
+      min-height: 0;
     }
 
     .card{
@@ -120,7 +123,7 @@ Changes from v1.4.8-compact.8:
       display:flex;
       align-items:center;
       justify-content:space-between;
-      padding: 12px 16px; /* slightly tighter */
+      padding: 12px 16px;
       border-bottom: 1px solid rgba(255,255,255,0.08);
       background: linear-gradient(180deg, rgba(255,255,255,0.04), transparent);
       gap: 10px;
@@ -194,7 +197,6 @@ Changes from v1.4.8-compact.8:
     .accent-orange{ color: var(--orange); }
     .accent-magenta{ color: var(--magenta); }
 
-    /* Row 1 inside overview: two panels */
     .row1{
       display:grid;
       grid-template-columns: 1fr 1fr;
@@ -233,12 +235,10 @@ Changes from v1.4.8-compact.8:
       text-align:right;
     }
 
-    /* Full-width panels inside overview */
     .fullrow{
       margin-top: 12px;
     }
 
-    /* Chart block (reused) */
     .chart-wrap{
       margin-top: 10px;
       padding-top: 10px;
@@ -291,10 +291,7 @@ Changes from v1.4.8-compact.8:
       border: 1px solid rgba(255,255,255,0.10);
     }
 
-    /* make blocks chart bigger in full row */
     #blocks-chart{ height: 95px; }
-
-    /* make hashrate chart bigger than blocks */
     #hashrate-chart{ height: 150px; }
 
     .controls{
@@ -370,7 +367,6 @@ Changes from v1.4.8-compact.8:
       margin-top: 10px;
     }
 
-    /* Right column full-height stacking */
     .rightcol{
       display:flex;
       flex-direction:column;
@@ -407,11 +403,8 @@ Changes from v1.4.8-compact.8:
     .evt.block{ border-left-color: var(--yellow); }
     .evt.payout{ border-left-color: var(--cyan); }
     .evt.miner{ border-left-color: rgba(255,255,255,0.35); }
-
-    /* magenta miner payout */
     .evt.minerpay{ border-left-color: var(--magenta); }
 
-    /* Collapsible Miner Check */
     .collapse-btn{
       padding: 6px 10px;
       border-radius: 999px;
@@ -430,7 +423,6 @@ Changes from v1.4.8-compact.8:
     .card.collapsed{ flex: 0 0 auto; }
     .card.collapsed .head{ border-bottom: none; }
 
-    /* Make feed card flex-fill */
     #feed-card{
       flex: 1 1 auto;
       min-height: 0;
@@ -446,7 +438,6 @@ Changes from v1.4.8-compact.8:
       min-height: 0;
     }
 
-    /* link styling (muted inline, hover highlight) */
     a.explink{
       color: var(--muted);
       text-decoration: none;
@@ -460,7 +451,6 @@ Changes from v1.4.8-compact.8:
       background: rgba(255,255,255,0.08);
     }
 
-    /* miner link styling (clickable miner address in live feed) */
     .minerlink{
       cursor: pointer;
       padding: 0 2px;
@@ -474,15 +464,13 @@ Changes from v1.4.8-compact.8:
     }
 
     @media (max-width: 1100px){
-      body{ overflow:auto; height:auto; }            /* allow scroll on small screens */
+      body{ overflow:auto; height:auto; }
       .wrap{ height:auto; overflow:visible; }
       .grid{ grid-template-columns: 1fr; min-height: unset; }
       .kpis{ grid-template-columns: repeat(2, 1fr); }
       .row1{ grid-template-columns: 1fr; }
       .rightcol{ height:auto; }
       #feed-card{ min-height: 420px; }
-
-      /* on small screens, left-align status in Pool Overview header */
       .statuswrap{ justify-content: flex-start; }
     }
 
@@ -503,7 +491,6 @@ Changes from v1.4.8-compact.8:
         <div class="head">
           <h2>Pool Overview</h2>
 
-          <!-- Moved WS status here (from removed top header) -->
           <div class="statuswrap" title="WebSocket connection status">
             <div class="statusline">
               <span id="status-dot" class="dot"></span>
@@ -546,7 +533,6 @@ Changes from v1.4.8-compact.8:
             </div>
           </div>
 
-          <!-- Row 1: two panels (trimmed) -->
           <div class="row1">
             <div class="panel">
               <div class="label">Network Health</div>
@@ -621,7 +607,6 @@ Changes from v1.4.8-compact.8:
             </div>
           </div>
 
-          <!-- Row 2: Pool Blocks (full width) -->
           <div class="fullrow">
             <div class="panel">
               <div class="chart-wrap">
@@ -634,12 +619,10 @@ Changes from v1.4.8-compact.8:
                   </div>
                 </div>
                 <canvas id="blocks-chart" width="1200" height="260"></canvas>
-
               </div>
             </div>
           </div>
 
-          <!-- Row 3: Pool Hashrate (full width, bigger) -->
           <div class="fullrow">
             <div class="panel">
               <div class="chart-wrap">
@@ -652,7 +635,6 @@ Changes from v1.4.8-compact.8:
                   </div>
                 </div>
                 <canvas id="hashrate-chart" width="1200" height="420"></canvas>
-
               </div>
             </div>
           </div>
@@ -760,13 +742,11 @@ Changes from v1.4.8-compact.8:
   const FEED_MODE_BLOCKS = "blocks";
   const FEED_MODE_PAYOUTS = "payouts";
 
-  // Explorer endpoints (per Snap Coin dev)
   const EXPLORER_TX_BASE = "https://explorer.snap-coin.net/tx/";
   const EXPLORER_BLOCK_BASE = "https://explorer.snap-coin.net/block/";
 
-  // Snapshot endpoint (backend: GET /api/snapshot)
   const SNAPSHOT_URL = "/api/snapshot";
-  const SNAPSHOT_POLL_MS = 10000; // 10s best-effort hydration
+  const SNAPSHOT_POLL_MS = 10000;
 
   // -------------------------------------------------------------------------
   // State
@@ -822,11 +802,11 @@ Changes from v1.4.8-compact.8:
     feedMinerOnly: false,
     feedEvents: [],
 
-    // snapshot replay flag — skips counter bumps in ingestEvent
+    // v1.4.8: snapshot replay flag — skips counter bumps in ingestEvent
     replayingSnapshot: false,
 
-    // v1.4.9: ensure snapshot replay runs once per page load (prevents periodic wipe)
-    snapshotReplayDone: false,
+    // v1.4.9: prevent periodic polls from wiping the live feed
+    initialSnapshotApplied: false,
   };
 
   // -------------------------------------------------------------------------
@@ -937,7 +917,6 @@ Changes from v1.4.8-compact.8:
     return `<span class="${cls}" data-miner="${escapeHtml(m)}">${escapeHtml(m)}</span>`;
   }
 
-  // Snapshot best-effort helpers
   function pick(obj, keys){
     if(!obj || typeof obj !== "object") return undefined;
     for(const k of keys){
@@ -951,6 +930,10 @@ Changes from v1.4.8-compact.8:
     return num.toLocaleString();
   }
 
+  // -------------------------------------------------------------------------
+  // applySnapshot — KPI/network/payout stats updated every poll.
+  //                 Feed replay ONLY on first call (initialSnapshotApplied).
+  // -------------------------------------------------------------------------
   function applySnapshot(snap){
     if(!snap || typeof snap !== "object") return;
 
@@ -975,8 +958,10 @@ Changes from v1.4.8-compact.8:
         state.totalPaidToMinersAtomic = String(totals.total_paid_to_miners);
       }
     }
-    // ---------------------------------------------------------------------
 
+    // ---------------------------------------------------------------------
+    // Network + payout stats (safe to update every poll)
+    // ---------------------------------------------------------------------
     const net = pick(snap, ["net", "network", "network_stats", "networkStats"]) || snap;
     const payout = pick(snap, ["payout", "last_payout", "lastPayout", "payout_summary", "payoutSummary"]) || snap;
 
@@ -1011,7 +996,7 @@ Changes from v1.4.8-compact.8:
     if (elDiff) {
       const diffNum = Number(snap.pool_difficulty_fixed_num);
       elDiff.textContent = (diffNum > 0) ? formatDifficulty(diffNum) : "—";
-      elDiff.title = snap.pool_difficulty_fixed || "";  // hex on hover
+      elDiff.title = snap.pool_difficulty_fixed || "";
     }
 
     const paidT = pick(snap, ["totalPaidToMinersAtomic","total_paid_to_miners_atomic","total_paid_to_miners"]);
@@ -1032,7 +1017,7 @@ Changes from v1.4.8-compact.8:
     if(bf !== undefined && isFinite(Number(bf))) state.blocksFound = Number(bf);
 
     // -----------------------------------------------------------------
-    // Hydrate daily_buckets into blocksByDay
+    // Hydrate daily_buckets into blocksByDay (safe every poll)
     // -----------------------------------------------------------------
     const buckets = snap.daily_buckets || snap.dailyBuckets || [];
     if (Array.isArray(buckets)) {
@@ -1053,66 +1038,43 @@ Changes from v1.4.8-compact.8:
     }
 
     // -----------------------------------------------------------------
-    // v1.4.9: Replay recent_events ONLY ONCE.
-    //         Never wipe feed unless ingest >= 1.
+    // v1.4.9 FIX: Replay recent_events into feed ONLY on first snapshot.
+    // Subsequent polls update KPIs above but leave feedEvents untouched
+    // so live WS block/payout entries are not wiped.
     // -----------------------------------------------------------------
-    if(state.snapshotReplayDone) return;
+    if (!state.initialSnapshotApplied) {
+      const recentEvts = snap.recent_events || snap.recentEvents || [];
+      if (Array.isArray(recentEvts) && recentEvts.length) {
+        state.replayingSnapshot = true;
+        state.feedEvents = [];
 
-    const recentEvts = snap.recent_events || snap.recentEvents || [];
-    if (!Array.isArray(recentEvts) || recentEvts.length === 0) return;
+        for (const evt of recentEvts) {
+          if (!evt || !evt.type) continue;
+          const origTs = evt.timestamp ? evt.timestamp * 1000 : Date.now();
+          const savedNow = Date.now;
+          Date.now = () => origTs;
+          try {
+            ingestEvent(evt);
+          } finally {
+            Date.now = savedNow;
+          }
+        }
 
-    state.snapshotReplayDone = true;
-
-    // Keep current feed in case replay fails to ingest anything.
-    const prevFeed = state.feedEvents.slice();
-
-    state.replayingSnapshot = true;
-
-    // Only clear if we actually ingest at least one event.
-    let ingested = 0;
-
-    // Stage: ingest into a cleared buffer, but only commit if ingested>0.
-    state.feedEvents = [];
-
-    for (const evt of recentEvts) {
-      if (!evt || typeof evt !== "object") continue;
-
-      // Backend schema confirmed: { type: "MinerConnected", ... }
-      if (!evt.type) continue;
-
-      const tsSec = evt.timestamp;
-      const origTs = (tsSec !== undefined && tsSec !== null && isFinite(Number(tsSec)))
-        ? (Number(tsSec) * 1000)
-        : Date.now();
-
-      const savedNow = Date.now;
-      Date.now = () => origTs;
-      try {
-        ingestEvent(evt);
-        ingested++;
-      } finally {
-        Date.now = savedNow;
+        state.replayingSnapshot = false;
+        savePersisted();
+        updateKpis();
+        renderFeed();
+        refreshMinerPicker();
       }
+
+      state.initialSnapshotApplied = true;
     }
-
-    state.replayingSnapshot = false;
-
-    if(ingested === 0){
-      // Restore previous feed; do not leave UI empty.
-      state.feedEvents = prevFeed;
-      renderFeed();
-      return;
-    }
-
-    savePersisted();
-    updateKpis();
-    renderFeed();
-    refreshMinerPicker();
   }
+
 
   async function fetchSnapshot(){
     const host = window.location.host;
-    if(!host) return; // file://
+    if(!host) return;
 
     try{
       const res = await fetch(SNAPSHOT_URL, { cache: "no-store" });
@@ -1482,7 +1444,7 @@ Changes from v1.4.8-compact.8:
     if(state.feedEvents.length > FEED_MAX){
       state.feedEvents.splice(FEED_MAX);
     }
-    // skip per-event render during snapshot replay (bulk render after)
+    // v1.4.8: skip per-event render during snapshot replay (bulk render after)
     if(!state.replayingSnapshot){
       renderFeed();
     }
@@ -1930,6 +1892,7 @@ Changes from v1.4.8-compact.8:
     state.lastEvtMs = Date.now();
     lastEvt.textContent = fmtTime(state.lastEvtMs);
 
+    // v1.4.8: helper — true when we should skip counter mutations
     const replay = state.replayingSnapshot;
 
     switch(ev.type){
@@ -1991,6 +1954,7 @@ Changes from v1.4.8-compact.8:
         const workUnits = ev.work_units;
         const workTotal = ev.work_total;
 
+        // v1.4.8: skip counter bump during replay (totals already set)
         if(!replay){
           state.sharesAccepted += 1;
           pushTs(state.poolShareTimesMs, nowMs);
@@ -2048,6 +2012,7 @@ Changes from v1.4.8-compact.8:
         const miner = String(ev.miner ?? "").trim();
         const reason = String(ev.reason ?? "").trim();
 
+        // v1.4.8: skip counter bump during replay
         if(!replay){
           state.sharesRejected += 1;
           savePersisted();
@@ -2093,6 +2058,7 @@ Changes from v1.4.8-compact.8:
 
         const blockKey = `block:${height ?? "?"}`;
 
+        // v1.4.8: skip counter bump during replay
         if(!replay){
           const isNew = addSeenKey(state.seenBlockKeys, blockKey);
           if(isNew){
@@ -2140,6 +2106,7 @@ Changes from v1.4.8-compact.8:
         const payoutKey =
           `payout:${height ?? "?"}:${String(totalReward ?? "—")}:${String(poolFee ?? "—")}:${String(minersPaid ?? "—")}`;
 
+        // v1.4.8: skip all counter/payout mutations during replay
         if(!replay){
           const isNew = addSeenKey(state.seenPayoutKeys, payoutKey);
 
@@ -2180,6 +2147,8 @@ Changes from v1.4.8-compact.8:
         const netShown = (minersNetFromPayouts !== null)
           ? fmtReward(String(minersNetFromPayouts))
           : ((rewardNetAtomic(totalReward, poolFee) === null) ? "—" : fmtReward(String(rewardNetAtomic(totalReward, poolFee))));
+
+        const isNewForLabel = !replay ? !state.seenPayoutKeys.has(payoutKey) : false;
 
         pushFeedEvent({
           tsMs: Date.now(),
@@ -2257,6 +2226,7 @@ Changes from v1.4.8-compact.8:
         break;
     }
 
+    // v1.4.8: skip per-event UI refresh during replay (bulk refresh after)
     if(!replay){
       updateKpis();
 
@@ -2357,7 +2327,6 @@ Changes from v1.4.8-compact.8:
     applyMinerCollapsed();
   });
 
-  // Click any miner address in the live feed to open Miner Check
   feed.addEventListener("click", (e) => {
     const t = e.target && e.target.closest ? e.target.closest(".minerlink") : null;
     if(!t) return;
@@ -2454,10 +2423,8 @@ Changes from v1.4.8-compact.8:
   updateKpis();
   renderFeed();
 
-  // Initial REST snapshot hydration (best-effort)
   fetchSnapshot();
 
-  // Periodic snapshot hydration (best-effort)
   setInterval(() => {
     fetchSnapshot();
   }, SNAPSHOT_POLL_MS);
@@ -2477,5 +2444,5 @@ Changes from v1.4.8-compact.8:
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
 Version: 1.4.9-compact.9
-Updated: 2026-02-12T20:10:00Z
+Created: 2026-02-12T23:30:00Z
 ========================================================================  -->
