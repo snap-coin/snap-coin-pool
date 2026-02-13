@@ -49,7 +49,7 @@ use num_bigint::BigUint;
 
 const DEFAULT_STATE_FILE: &str = "pool_state.json";
 const DEFAULT_LEDGER_DIR: &str = ".";
-const DEFAULT_RECENT_EVENTS: usize = 120;
+const DEFAULT_RECENT_EVENTS: usize = 2000;
 const DEFAULT_DAILY_DAYS: usize = 30;
 
 // ── Env parsing helpers ─────────────────────────────────────────────────────
