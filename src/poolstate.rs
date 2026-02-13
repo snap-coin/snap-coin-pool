@@ -1,7 +1,7 @@
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.0.4-snapshot-ledger.1
+// Version: 1.0.6-last-payout-rebuild.1
 //
 // Description: Server-side shared pool state (snapshot hydration) + lightweight
 //              disk persistence (no DB).
@@ -16,7 +16,7 @@
 //
 // Notes:
 //   - This module intentionally stores ONLY what the dashboard needs.
-//   - Recent events are bounded (default 120).
+//   - Recent events are bounded (default 2000).
 //   - Daily buckets are bounded (default 30 days).
 //   - Uses an internal UTC day formatter (civil_from_days) to avoid adding chrono.
 //
@@ -30,6 +30,13 @@
 //     even when PoolState is constructed before other modules call dotenvy::dotenv().
 //   - Preserve all existing behavior:
 //       * NetworkStats hard-ignored (not persisted, not stored in recent events).
+//
+// CHANGELOG (v1.0.6-last-payout-rebuild.1):
+//   - Add `last_payout` to PoolSnapshot (server-side hydration for payout summary).
+//   - Populate last_payout on PayoutComplete events.
+//   - On startup, rebuild last_payout from the most recent PayoutComplete found in
+//     loaded recent_events if last_payout is empty (height==0).
+//   - Preserve all existing behavior / persistence / flush logic.
 // ============================================================================
 
 use std::{
@@ -109,11 +116,29 @@ pub struct LastBlock {
     pub timestamp: u64,
 }
 
+/// NEW: Last payout summary for dashboard hydration.
+/// Backwards compatible via #[serde(default)] in PoolSnapshot.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct LastPayout {
+    pub height: u64,
+    pub miners_paid: u64,
+    pub total_reward: u64,
+    pub pool_fee: u64,
+    pub paid_to_miners: u64,
+    pub txid: String,
+    pub timestamp: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct PoolSnapshot {
     pub generated_at: u64,
     pub totals: Totals,
     pub last_block: LastBlock,
+
+    /// NEW: Persisted last payout summary for fresh-browser hydration.
+    #[serde(default)]
+    pub last_payout: LastPayout,
+
     pub daily_buckets: Vec<DailyBucket>,
     pub recent_events: Vec<PoolEvent>,
 
@@ -179,7 +204,7 @@ impl PoolState {
         // Ensure generated_at updates at startup.
         snapshot.generated_at = now_ts();
 
-        // NEW: ensure fixed pool difficulty fields are populated from env (best-effort).
+        // Ensure fixed pool difficulty fields are populated from env (best-effort).
         // We fill if missing/empty so existing persisted state doesn't fight config.
         if snapshot.pool_difficulty_fixed.trim().is_empty() {
             snapshot.pool_difficulty_fixed =
@@ -188,6 +213,12 @@ impl PoolState {
         if snapshot.pool_difficulty_fixed_num == 0 {
             snapshot.pool_difficulty_fixed_num =
                 compute_fixed_difficulty_u64_from_env().unwrap_or(0);
+        }
+
+        // NEW: If last_payout is empty, rebuild it from loaded recent_events.
+        // This fixes hydration after restart when there are PayoutComplete events in the ring.
+        if snapshot.last_payout.height == 0 {
+            rebuild_last_payout_from_recent_events(&mut snapshot);
         }
 
         // Seed ring buffer from loaded snapshot (filtered).
@@ -272,9 +303,12 @@ impl PoolState {
                 truncate_daily(&mut g.snapshot.daily_buckets);
             }
             PoolEvent::PayoutComplete {
-                payouts,
+                height,
+                miners_paid,
                 total_reward,
                 pool_fee,
+                txid,
+                payouts,
                 timestamp,
                 ..
             } => {
@@ -297,6 +331,17 @@ impl PoolState {
 
                 bump_daily_paid(&mut g.snapshot.daily_buckets, *timestamp, paid_to_miners);
                 truncate_daily(&mut g.snapshot.daily_buckets);
+
+                // NEW: Persist last payout summary for dashboard hydration.
+                g.snapshot.last_payout = LastPayout {
+                    height: *height,
+                    miners_paid: *miners_paid as u64,
+                    total_reward: *total_reward,
+                    pool_fee: *pool_fee,
+                    paid_to_miners,
+                    txid: txid.clone(),
+                    timestamp: *timestamp,
+                };
 
                 // Append ledger line (append-only), best-effort.
                 if g.ledger_enable {
@@ -358,6 +403,43 @@ impl PoolState {
 #[inline]
 fn is_network_stats(e: &PoolEvent) -> bool {
     matches!(e, PoolEvent::NetworkStats { .. })
+}
+
+/// NEW: If last_payout is empty on startup, rebuild it from the most recent
+/// PayoutComplete in snapshot.recent_events (iterating from the end).
+fn rebuild_last_payout_from_recent_events(snapshot: &mut PoolSnapshot) {
+    for e in snapshot.recent_events.iter().rev() {
+        if let PoolEvent::PayoutComplete {
+            height,
+            miners_paid,
+            total_reward,
+            pool_fee,
+            txid,
+            payouts,
+            timestamp,
+            ..
+        } = e
+        {
+            let paid_to_miners = if !payouts.is_empty() {
+                payouts
+                    .iter()
+                    .fold(0u64, |acc, p| acc.saturating_add(p.amount))
+            } else {
+                total_reward.saturating_sub(*pool_fee)
+            };
+
+            snapshot.last_payout = LastPayout {
+                height: *height,
+                miners_paid: *miners_paid as u64,
+                total_reward: *total_reward,
+                pool_fee: *pool_fee,
+                paid_to_miners,
+                txid: txid.clone(),
+                timestamp: *timestamp,
+            };
+            break;
+        }
+    }
 }
 
 fn truncate_daily(buckets: &mut Vec<DailyBucket>) {
@@ -512,6 +594,6 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.0.4-snapshot-ledger.1
-// Updated: 2026-02-12
+// Version: 1.0.6-last-payout-rebuild.1
+// Updated: 2026-02-13
 // ============================================================================
