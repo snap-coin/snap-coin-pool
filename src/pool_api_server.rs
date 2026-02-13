@@ -72,7 +72,7 @@ const SCORE_DECAY_INTERVAL: Duration = Duration::from_secs(30);
 const SCORE_DECAY_AMOUNT: i32 = 1;
 
 // Watchdog thresholds (pool-side mitigation; protocol-safe)
-const WATCHDOG_REJECT_STREAK_KICK: u32 = 2;
+const WATCHDOG_REJECT_STREAK_KICK: u32 = 3;
 
 // Kick escalation window + threshold
 const KICK_WINDOW_SECS: u64 = 300; // 5 minutes
@@ -82,10 +82,10 @@ const KICKS_TO_BAN: u32 = 3;
 const MAX_CONNS_PER_MINER: usize = 10;
 
 // Passive heartbeat (idle timeout) on the request stream
-const HEARTBEAT_IDLE_SECS: u64 = 120;
+const HEARTBEAT_IDLE_SECS: u64 = 3600;
 
 // Handshake watchdog (already present)
-const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
+const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 
 // ── IP scoring ──────────────────────────────────────────────────────────────
 
