@@ -1727,13 +1727,31 @@ Changes from v1.5.1-compact.11:
       return;
     }
 
-    let minV = Infinity, maxV = -Infinity;
-    for(const p of pts){
-      if(p.v < minV) minV = p.v;
-      if(p.v > maxV) maxV = p.v;
+    // -------------------------------
+    // FIX: percentile-clamped autoscale
+    // -------------------------------
+    function quantile(sortedVals, q){
+      const n = sortedVals.length;
+      if(n === 0) return NaN;
+      if(n === 1) return sortedVals[0];
+      const pos = (n - 1) * q;
+      const lo = Math.floor(pos);
+      const hi = Math.ceil(pos);
+      if(lo === hi) return sortedVals[lo];
+      const t = pos - lo;
+      return sortedVals[lo] * (1 - t) + sortedVals[hi] * t;
     }
-    if(!isFinite(minV) || !isFinite(maxV)) return;
-    if(maxV === minV) maxV = minV + 1;
+
+    const vals = pts.map(p => p.v).filter(v => isFinite(v)).slice().sort((a,b) => a - b);
+    if(vals.length < 2) return;
+
+    // Use a stable floor (0) so we don't “zoom” weirdly as low values change.
+    // If you prefer dynamic min, change minV to quantile(vals, 0.05).
+    let minV = 0;
+
+    const rawMax = vals[vals.length - 1];
+    const p95 = quantile(vals, 0.99);          // main scale target
+    const maxV = Math.max(1, p95, minV + 1);   // prevent degenerate scale
 
     const padL = 10;
     const padR = 10;
@@ -1746,8 +1764,11 @@ Changes from v1.5.1-compact.11:
     function xFor(t){
       return padL + ((t - t0) / windowMs) * innerW;
     }
+
+    // Clamp values above maxV so spikes clip instead of flattening the chart
     function yFor(v){
-      return padT + (1 - ((v - minV) / (maxV - minV))) * innerH;
+      const vv = (v > maxV) ? maxV : v;
+      return padT + (1 - ((vv - minV) / (maxV - minV))) * innerH;
     }
 
     hrChartCtx.strokeStyle = "rgba(76,255,155,0.75)";
@@ -1767,10 +1788,13 @@ Changes from v1.5.1-compact.11:
 
     hrChartCtx.fillStyle = "rgba(255,255,255,0.55)";
     hrChartCtx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
-    hrChartCtx.fillText(`min=${fmtHashrate(minV)}`, 12, 12);
-    const maxStr = `max=${fmtHashrate(maxV)}`;
-    hrChartCtx.fillText(maxStr, Math.max(12, w - 12 - maxStr.length * 6), 12);
+
+    // Display both the scale max (p95) and the true peak (rawMax) for transparency
+    hrChartCtx.fillText(`scale_max(p95)=${fmtHashrate(maxV)}`, 12, 12);
+    const peakStr = `peak=${fmtHashrate(rawMax)}`;
+    hrChartCtx.fillText(peakStr, Math.max(12, w - 12 - peakStr.length * 6), 12);
   }
+
 
   // v1.5.2: KPIs update does NOT redraw charts
   function updateKpis(){
