@@ -57,18 +57,22 @@ impl JobHandler {
 
         tokio::spawn(async move {
             event_client
-                .convert_to_event_listener(move |_event| {
-                    let is_building = is_building.clone();
-                    let job_client = job_client.clone();
-                    let job_tx = job_tx.clone();
-                    tokio::spawn(async move {
-                        build_job(&job_client, &is_building, pool_private, &job_tx).await;
-                        is_building.store(false, Ordering::Relaxed);
-                    });
-                })
+                .convert_to_event_listener(
+                    move |_event| {
+                        let is_building = is_building.clone();
+                        let job_client = job_client.clone();
+                        let job_tx = job_tx.clone();
+                        tokio::spawn(async move {
+                            build_job(&job_client, &is_building, pool_private, &job_tx).await;
+                            is_building.store(false, Ordering::Relaxed);
+                        });
+                    },
+                    None, // snap-coin v13.2.0: optional shutdown receiver
+                )
                 .await
                 .unwrap();
         });
+
 
         Ok((JobHandler { tx_subscriber }, first_job))
     }

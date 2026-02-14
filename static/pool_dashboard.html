@@ -1,18 +1,15 @@
 <!-- =========================================================================
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
-Version: 1.4.9-compact.9
+Version: 1.5.0-compact.10
 
-Changes from v1.4.8-compact.8:
-  - FIX: Block and Payout events now persist in Live Event Feed.
-      * Root cause: applySnapshot() was called every 10s by the snapshot
-        poll interval. Each call wiped state.feedEvents and replayed
-        snap.recent_events, destroying any live WS feed entries (blocks,
-        payouts) that arrived between polls.
-      * Added state.initialSnapshotApplied flag (default false).
-      * recent_events replay + feedEvents wipe now ONLY runs when
-        initialSnapshotApplied is false (first load). Subsequent snapshot
-        polls update KPIs/network/payout stats without touching the feed.
+Changes from v1.4.9-compact.9:
+  - Snapshot hydration updated to support new backend schema:
+      * On first snapshot only (initialSnapshotApplied=false):
+          - Merge recent_events (if present) + recent_shares + recent_blocks + recent_payouts
+          - Sort by timestamp ascending
+          - Replay via ingestEvent() using timestamp-based Date.now() override (same technique as before)
+      * Subsequent snapshot polls still update KPIs/network/payout stats without touching the feed
   - No other layout/logic changes.
 ========================================================================  -->
 <!DOCTYPE html>
@@ -31,7 +28,7 @@ Changes from v1.4.8-compact.8:
       --text: rgba(255,255,255,0.92);
       --muted: rgba(255,255,255,0.62);
 
-      --green: #4cff9b;
+      --green: #8cdaae;
       --cyan: #6fe7ff;
       --yellow: #ffe066;
       --red: #ff5c7a;
@@ -507,13 +504,13 @@ Changes from v1.4.8-compact.8:
             <div class="kpi">
               <div class="label">ACTIVE MINERS</div>
               <div id="kpi-miners" class="value accent-cyan">0</div>
-            
+
             </div>
 
             <div class="kpi">
               <div class="label">POOL HASHRATE</div>
               <div id="kpi-hr" class="value accent-orange">—</div>
-              
+
             </div>
 
             <div class="kpi">
@@ -523,13 +520,13 @@ Changes from v1.4.8-compact.8:
                 <span style="color:rgba(255,255,255,0.35)">/</span>
                 <span id="kpi-rej" class="accent-red">0</span>
               </div>
-              
+
             </div>
 
             <div class="kpi">
               <div class="label">BLOCKS FOUND</div>
               <div id="kpi-blocks" class="value accent-yellow">0</div>
-              
+
             </div>
           </div>
 
@@ -648,7 +645,7 @@ Changes from v1.4.8-compact.8:
           <div class="head">
             <h2>Miner Check (by addy)</h2>
             <div style="display:flex; align-items:center; gap:10px;">
-              
+
               <div id="miner-collapse-btn" class="collapse-btn" title="Collapse/expand Miner Check">Collapse</div>
             </div>
           </div>
@@ -693,7 +690,7 @@ Changes from v1.4.8-compact.8:
               <div id="feed-blocks" class="chip">Blocks</div>
               <div id="feed-payouts" class="chip">Payouts</div>
               <div id="feed-miner-only" class="chip" title="Show only events for the current Miner Check addy">Miner</div>
-              <div class="hint">last 2000 events</div>
+              <div class="hint">last 200 events</div>
             </div>
           </div>
           <div class="body">
@@ -1038,17 +1035,38 @@ Changes from v1.4.8-compact.8:
     }
 
     // -----------------------------------------------------------------
-    // v1.4.9 FIX: Replay recent_events into feed ONLY on first snapshot.
-    // Subsequent polls update KPIs above but leave feedEvents untouched
-    // so live WS block/payout entries are not wiped.
+    // v1.5.0 FIX: Replay snapshot feed from new backend schema on first load.
+    // Merges: recent_events (if present) + recent_shares + recent_blocks + recent_payouts
     // -----------------------------------------------------------------
     if (!state.initialSnapshotApplied) {
-      const recentEvts = snap.recent_events || snap.recentEvents || [];
-      if (Array.isArray(recentEvts) && recentEvts.length) {
+      const merged = [];
+
+      // Backward-compat: if backend still provides unified recent_events, include it.
+      const reUnified = snap.recent_events || snap.recentEvents || null;
+      if (Array.isArray(reUnified) && reUnified.length) {
+        for (const e of reUnified) merged.push(e);
+      }
+
+      const reShares  = snap.recent_shares  || snap.recentShares  || null;
+      const reBlocks  = snap.recent_blocks  || snap.recentBlocks  || null;
+      const rePayouts = snap.recent_payouts || snap.recentPayouts || null;
+
+      if (Array.isArray(reShares)  && reShares.length)  for (const e of reShares)  merged.push(e);
+      if (Array.isArray(reBlocks)  && reBlocks.length)  for (const e of reBlocks)  merged.push(e);
+      if (Array.isArray(rePayouts) && rePayouts.length) for (const e of rePayouts) merged.push(e);
+
+      if (merged.length) {
+        // Sort oldest -> newest by timestamp (seconds).
+        merged.sort((a,b) => {
+          const ta = Number((a && a.timestamp) ? a.timestamp : 0);
+          const tb = Number((b && b.timestamp) ? b.timestamp : 0);
+          return ta - tb;
+        });
+
         state.replayingSnapshot = true;
         state.feedEvents = [];
 
-        for (const evt of recentEvts) {
+        for (const evt of merged) {
           if (!evt || !evt.type) continue;
           const origTs = evt.timestamp ? evt.timestamp * 1000 : Date.now();
           const savedNow = Date.now;
@@ -1070,7 +1088,6 @@ Changes from v1.4.8-compact.8:
       state.initialSnapshotApplied = true;
     }
   }
-
 
   async function fetchSnapshot(){
     const host = window.location.host;
@@ -2443,6 +2460,6 @@ Changes from v1.4.8-compact.8:
 <!-- =========================================================================
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
-Version: 1.4.9-compact.9
-Created: 2026-02-12T23:30:00Z
+Version: 1.5.0-compact.10
+Created: 2026-02-13T22:00:00Z
 ========================================================================  -->

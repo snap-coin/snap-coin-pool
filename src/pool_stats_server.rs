@@ -334,39 +334,43 @@ fn spawn_network_stats_tasks(event_tx: broadcast::Sender<PoolEvent>, pool_state:
         };
 
         let res = client
-            .convert_to_event_listener(move |event: ChainEvent| {
-                let snap_event = snap_event.clone();
-                tokio::spawn(async move {
-                    if let ChainEvent::Block { .. } = event {
-                        let now = now_ts();
-                        let mut s = snap_event.lock().await;
+            .convert_to_event_listener(
+                move |event: ChainEvent| {
+                    let snap_event = snap_event.clone();
+                    tokio::spawn(async move {
+                        if let ChainEvent::Block { .. } = event {
+                            let now = now_ts();
+                            let mut s = snap_event.lock().await;
 
-                        if s.last_block_seen_ts != 0 {
-                            s.prev_block_seen_ts = s.last_block_seen_ts;
-                            s.last_block_seen_ts = now;
+                            if s.last_block_seen_ts != 0 {
+                                s.prev_block_seen_ts = s.last_block_seen_ts;
+                                s.last_block_seen_ts = now;
 
-                            let dt = s.last_block_seen_ts.saturating_sub(s.prev_block_seen_ts);
-                            if dt > 0 {
-                                // rolling average: (old*7 + new)/8
-                                s.avg_block_time_secs = if s.avg_block_time_secs == 0 {
-                                    dt
-                                } else {
-                                    ((s.avg_block_time_secs * 7) + dt) / 8
-                                };
+                                let dt = s.last_block_seen_ts.saturating_sub(s.prev_block_seen_ts);
+                                if dt > 0 {
+                                    // rolling average: (old*7 + new)/8
+                                    s.avg_block_time_secs = if s.avg_block_time_secs == 0 {
+                                        dt
+                                    } else {
+                                        ((s.avg_block_time_secs * 7) + dt) / 8
+                                    };
+                                }
+                            } else {
+                                s.last_block_seen_ts = now;
+                                s.prev_block_seen_ts = 0;
+                                s.avg_block_time_secs = 0;
                             }
-                        } else {
-                            s.last_block_seen_ts = now;
-                            s.prev_block_seen_ts = 0;
-                            s.avg_block_time_secs = 0;
                         }
-                    }
-                });
-            })
+                    });
+                },
+                None, // snap-coin v13.2.0: optional shutdown receiver
+            )
             .await;
 
         if let Err(e) = res {
             tracing::warn!("[NET] event listener ended: {}", e);
         }
+
     });
 
     // 2) Poll node: height/reward/block_target/last_hash once per second

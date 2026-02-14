@@ -23,7 +23,7 @@ envy = "0.4.2"
 num-bigint = "0.4.6"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-snap-coin = "11.2.2"
+snap-coin = "13.0.0"
 tokio = { version = "1.49.0", features = ["full"] }
 
 # --- Stats server (Axum WebSocket + static dashboard) ---
