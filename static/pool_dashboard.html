@@ -1,15 +1,14 @@
 <!-- =========================================================================
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
-Version: 1.5.0-compact.10
+Version: 1.5.2-compact.12
 
-Changes from v1.4.9-compact.9:
-  - Snapshot hydration updated to support new backend schema:
-      * On first snapshot only (initialSnapshotApplied=false):
-          - Merge recent_events (if present) + recent_shares + recent_blocks + recent_payouts
-          - Sort by timestamp ascending
-          - Replay via ingestEvent() using timestamp-based Date.now() override (same technique as before)
-      * Subsequent snapshot polls still update KPIs/network/payout stats without touching the feed
+Changes from v1.5.1-compact.11:
+  - Restore smooth "old method" chart behavior (no periodic flicker):
+      * Fetch /api/snapshot ONCE (seed arrays) instead of polling
+      * Charts redraw ONLY when chart data changes, mode changes, or resize
+      * updateKpis() no longer redraws charts (KPIs can refresh without chart repaint)
+      * requestAnimationFrame scheduler to coalesce chart draws
   - No other layout/logic changes.
 ========================================================================  -->
 <!DOCTYPE html>
@@ -743,7 +742,6 @@ Changes from v1.4.9-compact.9:
   const EXPLORER_BLOCK_BASE = "https://explorer.snap-coin.net/block/";
 
   const SNAPSHOT_URL = "/api/snapshot";
-  const SNAPSHOT_POLL_MS = 10000;
 
   // -------------------------------------------------------------------------
   // State
@@ -799,11 +797,16 @@ Changes from v1.4.9-compact.9:
     feedMinerOnly: false,
     feedEvents: [],
 
-    // v1.4.8: snapshot replay flag — skips counter bumps in ingestEvent
     replayingSnapshot: false,
-
-    // v1.4.9: prevent periodic polls from wiping the live feed
     initialSnapshotApplied: false,
+
+    // v1.5.2: snapshot fetched ONCE (old method)
+    snapshotFetchedOnce: false,
+
+    // v1.5.2: chart redraw scheduler
+    chartsRaf: 0,
+    chartsDirtyBlocks: true,
+    chartsDirtyHr: true,
   };
 
   // -------------------------------------------------------------------------
@@ -928,37 +931,55 @@ Changes from v1.4.9-compact.9:
   }
 
   // -------------------------------------------------------------------------
-  // applySnapshot — KPI/network/payout stats updated every poll.
+  // Chart scheduling (v1.5.2)
+  // -------------------------------------------------------------------------
+  function markChartsDirty(which){
+    if(which === "blocks") state.chartsDirtyBlocks = true;
+    if(which === "hr") state.chartsDirtyHr = true;
+    if(which === "all"){ state.chartsDirtyBlocks = true; state.chartsDirtyHr = true; }
+    scheduleCharts();
+  }
+
+  function scheduleCharts(){
+    if(state.chartsRaf) return;
+    state.chartsRaf = requestAnimationFrame(() => {
+      state.chartsRaf = 0;
+
+      // only draw what is dirty
+      if(state.chartsDirtyBlocks){
+        state.chartsDirtyBlocks = false;
+        drawBlocksChart();
+      }
+      if(state.chartsDirtyHr){
+        state.chartsDirtyHr = false;
+        drawHashrateChart();
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // applySnapshot — KPI/network/payout stats updated from ONE snapshot fetch.
   //                 Feed replay ONLY on first call (initialSnapshotApplied).
   // -------------------------------------------------------------------------
   function applySnapshot(snap){
     if(!snap || typeof snap !== "object") return;
 
-    // ---------------------------------------------------------------------
-    // Read nested snapshot.totals (backend schema)
-    // ---------------------------------------------------------------------
     const totals = snap.totals || null;
     if (totals && typeof totals === "object") {
       if (totals.shares_acc !== undefined && isFinite(Number(totals.shares_acc))) {
         state.sharesAccepted = Number(totals.shares_acc);
       }
-
       if (totals.shares_rej !== undefined && isFinite(Number(totals.shares_rej))) {
         state.sharesRejected = Number(totals.shares_rej);
       }
-
       if (totals.blocks_found !== undefined && isFinite(Number(totals.blocks_found))) {
         state.blocksFound = Number(totals.blocks_found);
       }
-
       if (totals.total_paid_to_miners !== undefined && totals.total_paid_to_miners !== null) {
         state.totalPaidToMinersAtomic = String(totals.total_paid_to_miners);
       }
     }
 
-    // ---------------------------------------------------------------------
-    // Network + payout stats (safe to update every poll)
-    // ---------------------------------------------------------------------
     const net = pick(snap, ["net", "network", "network_stats", "networkStats"]) || snap;
     const payout = pick(snap, ["payout", "last_payout", "lastPayout", "payout_summary", "payoutSummary"]) || snap;
 
@@ -1013,9 +1034,34 @@ Changes from v1.4.9-compact.9:
     if(sr !== undefined && isFinite(Number(sr))) state.sharesRejected = Number(sr);
     if(bf !== undefined && isFinite(Number(bf))) state.blocksFound = Number(bf);
 
-    // -----------------------------------------------------------------
-    // Hydrate daily_buckets into blocksByDay (safe every poll)
-    // -----------------------------------------------------------------
+    // Hydrate backend hashrate timeseries into hrSeries (ONE snapshot fetch is enough)
+    const tsRoot = (snap.timeseries && typeof snap.timeseries === "object") ? snap.timeseries : null;
+    const tsArr = tsRoot ? (tsRoot.hashrate_1m_24h || tsRoot.hashrate1m24h || null) : null;
+    if (Array.isArray(tsArr) && tsArr.length >= 2) {
+      const nowMs = Date.now();
+      const keepT = nowMs - (48 * 3600 * 1000);
+
+      const pts = tsArr
+        .map(p => {
+          const tSec = (p && p.t !== undefined && p.t !== null) ? Number(p.t) : NaN;
+          const v = (p && p.v !== undefined && p.v !== null) ? Number(p.v) : NaN;
+          if(!isFinite(tSec) || !isFinite(v)) return null;
+          const tMs = Math.floor(tSec * 1000);
+          return { t: tMs, v: v };
+        })
+        .filter(p => p && isFinite(p.t) && isFinite(p.v))
+        .filter(p => p.t >= keepT && p.t <= nowMs)
+        .sort((a,b) => a.t - b.t);
+
+      if (pts.length >= 2) {
+        state.hrSeries = pts.slice(-4000);
+        state.lastHrSampleMs = nowMs;
+        savePersisted();
+        markChartsDirty("hr");
+      }
+    }
+
+    // Hydrate daily_buckets into blocksByDay
     const buckets = snap.daily_buckets || snap.dailyBuckets || [];
     if (Array.isArray(buckets)) {
       for (const b of buckets) {
@@ -1025,6 +1071,7 @@ Changes from v1.4.9-compact.9:
           state.blocksByDay[dateKey] = Number(b.blocks);
         }
       }
+      markChartsDirty("blocks");
     }
 
     updateKpis();
@@ -1034,14 +1081,10 @@ Changes from v1.4.9-compact.9:
       setMinerView(cur);
     }
 
-    // -----------------------------------------------------------------
-    // v1.5.0 FIX: Replay snapshot feed from new backend schema on first load.
-    // Merges: recent_events (if present) + recent_shares + recent_blocks + recent_payouts
-    // -----------------------------------------------------------------
+    // Replay snapshot feed ONLY on first snapshot apply
     if (!state.initialSnapshotApplied) {
       const merged = [];
 
-      // Backward-compat: if backend still provides unified recent_events, include it.
       const reUnified = snap.recent_events || snap.recentEvents || null;
       if (Array.isArray(reUnified) && reUnified.length) {
         for (const e of reUnified) merged.push(e);
@@ -1056,7 +1099,6 @@ Changes from v1.4.9-compact.9:
       if (Array.isArray(rePayouts) && rePayouts.length) for (const e of rePayouts) merged.push(e);
 
       if (merged.length) {
-        // Sort oldest -> newest by timestamp (seconds).
         merged.sort((a,b) => {
           const ta = Number((a && a.timestamp) ? a.timestamp : 0);
           const tb = Number((b && b.timestamp) ? b.timestamp : 0);
@@ -1086,10 +1128,16 @@ Changes from v1.4.9-compact.9:
       }
 
       state.initialSnapshotApplied = true;
+
+      // initial snapshot: ensure charts draw once
+      markChartsDirty("all");
     }
   }
 
-  async function fetchSnapshot(){
+  async function fetchSnapshotOnce(){
+    if(state.snapshotFetchedOnce) return;
+    state.snapshotFetchedOnce = true;
+
     const host = window.location.host;
     if(!host) return;
 
@@ -1461,7 +1509,6 @@ Changes from v1.4.9-compact.9:
     if(state.feedEvents.length > FEED_MAX){
       state.feedEvents.splice(FEED_MAX);
     }
-    // v1.4.8: skip per-event render during snapshot replay (bulk render after)
     if(!state.replayingSnapshot){
       renderFeed();
     }
@@ -1725,6 +1772,7 @@ Changes from v1.4.9-compact.9:
     hrChartCtx.fillText(maxStr, Math.max(12, w - 12 - maxStr.length * 6), 12);
   }
 
+  // v1.5.2: KPIs update does NOT redraw charts
   function updateKpis(){
     kpiMiners.textContent = String(state.minersActive.size);
     kpiAcc.textContent = String(state.sharesAccepted);
@@ -1758,9 +1806,6 @@ Changes from v1.4.9-compact.9:
     updateBlocksChips();
     updateHrChips();
     updateFeedChips();
-
-    drawBlocksChart();
-    drawHashrateChart();
   }
 
   function setMinerView(minerId){
@@ -1887,6 +1932,9 @@ Changes from v1.4.9-compact.9:
     }
 
     savePersisted();
+
+    // v1.5.2: only redraw HR chart when series changes
+    markChartsDirty("hr");
   }
 
   // -------------------------------------------------------------------------
@@ -1897,8 +1945,8 @@ Changes from v1.4.9-compact.9:
     minerCollapseBtn.textContent = state.minerCollapsed ? "Expand" : "Collapse";
 
     setTimeout(() => {
-      drawBlocksChart();
-      drawHashrateChart();
+      // resize/layout change: redraw charts (dirty)
+      markChartsDirty("all");
     }, 0);
   }
 
@@ -1909,7 +1957,6 @@ Changes from v1.4.9-compact.9:
     state.lastEvtMs = Date.now();
     lastEvt.textContent = fmtTime(state.lastEvtMs);
 
-    // v1.4.8: helper — true when we should skip counter mutations
     const replay = state.replayingSnapshot;
 
     switch(ev.type){
@@ -1971,11 +2018,13 @@ Changes from v1.4.9-compact.9:
         const workUnits = ev.work_units;
         const workTotal = ev.work_total;
 
-        // v1.4.8: skip counter bump during replay (totals already set)
         if(!replay){
           state.sharesAccepted += 1;
           pushTs(state.poolShareTimesMs, nowMs);
+
+          // v1.5.2: this appends and marks chart dirty (smooth)
           sampleHashrateSeries();
+
           savePersisted();
         }
 
@@ -2029,7 +2078,6 @@ Changes from v1.4.9-compact.9:
         const miner = String(ev.miner ?? "").trim();
         const reason = String(ev.reason ?? "").trim();
 
-        // v1.4.8: skip counter bump during replay
         if(!replay){
           state.sharesRejected += 1;
           savePersisted();
@@ -2075,7 +2123,6 @@ Changes from v1.4.9-compact.9:
 
         const blockKey = `block:${height ?? "?"}`;
 
-        // v1.4.8: skip counter bump during replay
         if(!replay){
           const isNew = addSeenKey(state.seenBlockKeys, blockKey);
           if(isNew){
@@ -2083,6 +2130,9 @@ Changes from v1.4.9-compact.9:
             bumpBlocksToday();
             bumpBlocksThisHour();
             savePersisted();
+
+            // v1.5.2: redraw blocks chart ONLY when buckets change
+            markChartsDirty("blocks");
           }
         }
 
@@ -2123,7 +2173,6 @@ Changes from v1.4.9-compact.9:
         const payoutKey =
           `payout:${height ?? "?"}:${String(totalReward ?? "—")}:${String(poolFee ?? "—")}:${String(minersPaid ?? "—")}`;
 
-        // v1.4.8: skip all counter/payout mutations during replay
         if(!replay){
           const isNew = addSeenKey(state.seenPayoutKeys, payoutKey);
 
@@ -2164,8 +2213,6 @@ Changes from v1.4.9-compact.9:
         const netShown = (minersNetFromPayouts !== null)
           ? fmtReward(String(minersNetFromPayouts))
           : ((rewardNetAtomic(totalReward, poolFee) === null) ? "—" : fmtReward(String(rewardNetAtomic(totalReward, poolFee))));
-
-        const isNewForLabel = !replay ? !state.seenPayoutKeys.has(payoutKey) : false;
 
         pushFeedEvent({
           tsMs: Date.now(),
@@ -2243,7 +2290,6 @@ Changes from v1.4.9-compact.9:
         break;
     }
 
-    // v1.4.8: skip per-event UI refresh during replay (bulk refresh after)
     if(!replay){
       updateKpis();
 
@@ -2295,7 +2341,8 @@ Changes from v1.4.9-compact.9:
 
     ws.onopen = () => {
       setConnected(true);
-      fetchSnapshot();
+      // v1.5.2: seed arrays once (old method)
+      fetchSnapshotOnce();
     };
 
     ws.onclose = () => {
@@ -2367,32 +2414,38 @@ Changes from v1.4.9-compact.9:
     state.blocksMode = BLOCKS_MODE_1D;
     savePersisted();
     updateKpis();
+    markChartsDirty("blocks");
   });
   blocks7d.addEventListener("click", () => {
     state.blocksMode = BLOCKS_MODE_7D;
     savePersisted();
     updateKpis();
+    markChartsDirty("blocks");
   });
   blocks30d.addEventListener("click", () => {
     state.blocksMode = BLOCKS_MODE_30D;
     savePersisted();
     updateKpis();
+    markChartsDirty("blocks");
   });
 
   hr1h.addEventListener("click", () => {
     state.hrMode = HR_MODE_1H;
     savePersisted();
     updateKpis();
+    markChartsDirty("hr");
   });
   hr6h.addEventListener("click", () => {
     state.hrMode = HR_MODE_6H;
     savePersisted();
     updateKpis();
+    markChartsDirty("hr");
   });
   hr24h.addEventListener("click", () => {
     state.hrMode = HR_MODE_24H;
     savePersisted();
     updateKpis();
+    markChartsDirty("hr");
   });
 
   feedAll.addEventListener("click", () => {
@@ -2422,8 +2475,8 @@ Changes from v1.4.9-compact.9:
   });
 
   window.addEventListener("resize", () => {
-    drawBlocksChart();
-    drawHashrateChart();
+    // resize: redraw charts (dirty)
+    markChartsDirty("all");
   });
 
   // -------------------------------------------------------------------------
@@ -2440,16 +2493,17 @@ Changes from v1.4.9-compact.9:
   updateKpis();
   renderFeed();
 
-  fetchSnapshot();
+  // v1.5.2: fetch snapshot ONCE on boot (old method)
+  fetchSnapshotOnce();
 
-  setInterval(() => {
-    fetchSnapshot();
-  }, SNAPSHOT_POLL_MS);
-
+  // v1.5.2: keep local HR sampling tick (smooth, only redraws HR on new point)
   setInterval(() => {
     sampleHashrateSeries();
-    drawHashrateChart();
+    updateKpis();
   }, HR_SAMPLE_MS);
+
+  // initial paint
+  markChartsDirty("all");
 
   connectWs();
 })();
@@ -2460,6 +2514,6 @@ Changes from v1.4.9-compact.9:
 <!-- =========================================================================
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
-Version: 1.5.0-compact.10
-Created: 2026-02-13T22:00:00Z
+Version: 1.5.2-compact.12
+Created: 2026-02-14T00:00:00Z
 ========================================================================  -->

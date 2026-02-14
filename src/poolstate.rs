@@ -1,7 +1,7 @@
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.1.1-three-buffers-borrowfix.1
+// Version: 1.1.2-timeseries-hashrate24h.1
 //
 // Description: Server-side shared pool state (snapshot hydration) + lightweight
 //              disk persistence (no DB).
@@ -12,21 +12,24 @@
 //
 //              Intended integration points (from pool_stats_server.rs):
 //                - pool_state.on_event(&PoolEvent)  (for EVERY emitted event)
+//                - pool_state.record_hashrate_sample(f64) (periodic sample; e.g. 60s)
 //                - GET /api/snapshot -> pool_state.snapshot()
 //
 // Notes:
 //   - Recent events are split into THREE independent bounded buffers:
-//       * recent_shares  (default 500)   - share events + other non-block/payout events
-//       * recent_blocks  (default 1000)  - BlockFound events
-//       * recent_payouts (default 2000)  - PayoutComplete events
+//       * recent_shares  (default 200)   - share events + other non-block/payout events
+//       * recent_blocks  (default 200)   - BlockFound events
+//       * recent_payouts (default 200)   - PayoutComplete events
 //   - Each buffer has its own cap.
 //   - NetworkStats is hard-ignored (not persisted, not stored in any buffer).
 //   - Daily buckets bounded (default 30 days).
 //   - Uses internal UTC day formatter (civil_from_days) to avoid chrono.
+//   - NEW: Persistent timeseries (hashrate_1m_24h) stored inside pool_state.json.
 //
-// CHANGELOG (v1.1.1-three-buffers-borrowfix.1):
-//   - Fix E0499 by avoiding multiple &mut borrows of g.* in a single call.
-//   - Keep 3-buffer schema + legacy migration support.
+// CHANGELOG (v1.1.2-timeseries-hashrate24h.1):
+//   - Add snapshot.timeseries.hashrate_1m_24h with 24h rolling buffer (1440 points).
+//   - Add PoolState::record_hashrate_sample(f64) to append periodic samples.
+//   - Rehydrate/persist timeseries via pool_state.json.
 // ============================================================================
 
 use std::{
@@ -50,6 +53,9 @@ const DEFAULT_DAILY_DAYS: usize = 30;
 const DEFAULT_RECENT_SHARES: usize = 200;
 const DEFAULT_RECENT_BLOCKS: usize = 200;
 const DEFAULT_RECENT_PAYOUTS: usize = 200;
+
+// Timeseries caps.
+const DEFAULT_HASHRATE_POINTS_24H_1M: usize = 1440; // 24h @ 1 sample/min
 
 // ── Env parsing helpers ─────────────────────────────────────────────────────
 
@@ -114,6 +120,21 @@ pub struct LastPayout {
     pub timestamp: u64,
 }
 
+// ── Persistent time series (NEW) ────────────────────────────────────────────
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct TimeSeriesPoint {
+    pub t: u64,   // unix seconds
+    pub v: f64,   // value (e.g. hashrate H/s)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct TimeSeries {
+    // 24h rolling buffer sampled (typically) at 1 minute cadence.
+    #[serde(default)]
+    pub hashrate_1m_24h: Vec<TimeSeriesPoint>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct PoolSnapshot {
     pub generated_at: u64,
@@ -138,6 +159,10 @@ pub struct PoolSnapshot {
 
     #[serde(default)]
     pub pool_difficulty_fixed_num: u64,
+
+    // Persistent timeseries (NEW)
+    #[serde(default)]
+    pub timeseries: TimeSeries,
 }
 
 // Legacy schema loader (pre split): recent_events
@@ -170,6 +195,9 @@ struct Inner {
     recent_shares: VecDeque<PoolEvent>,
     recent_blocks: VecDeque<PoolEvent>,
     recent_payouts: VecDeque<PoolEvent>,
+
+    // Timeseries in-memory deques (NEW)
+    hashrate_1m_24h: VecDeque<TimeSeriesPoint>,
 
     dirty: bool,
     state_file: PathBuf,
@@ -229,7 +257,8 @@ impl PoolState {
                 read_pool_difficulty_fixed_hex_from_env().unwrap_or_else(|| "-".to_string());
         }
         if snapshot.pool_difficulty_fixed_num == 0 {
-            snapshot.pool_difficulty_fixed_num = compute_fixed_difficulty_u64_from_env().unwrap_or(0);
+            snapshot.pool_difficulty_fixed_num =
+                compute_fixed_difficulty_u64_from_env().unwrap_or(0);
         }
 
         let mut recent_shares = VecDeque::with_capacity(DEFAULT_RECENT_SHARES);
@@ -269,7 +298,12 @@ impl PoolState {
             for e in snapshot.recent_blocks.iter().cloned().take(DEFAULT_RECENT_BLOCKS) {
                 recent_blocks.push_back(e);
             }
-            for e in snapshot.recent_payouts.iter().cloned().take(DEFAULT_RECENT_PAYOUTS) {
+            for e in snapshot
+                .recent_payouts
+                .iter()
+                .cloned()
+                .take(DEFAULT_RECENT_PAYOUTS)
+            {
                 recent_payouts.push_back(e);
             }
         }
@@ -282,11 +316,29 @@ impl PoolState {
         snapshot.recent_blocks = recent_blocks.iter().cloned().collect();
         snapshot.recent_payouts = recent_payouts.iter().cloned().collect();
 
+        // ── Timeseries rehydrate (NEW) ───────────────────────────────────────
+        let mut hashrate_1m_24h = VecDeque::with_capacity(DEFAULT_HASHRATE_POINTS_24H_1M);
+        if !snapshot.timeseries.hashrate_1m_24h.is_empty() {
+            for p in snapshot
+                .timeseries
+                .hashrate_1m_24h
+                .iter()
+                .cloned()
+                .take(DEFAULT_HASHRATE_POINTS_24H_1M)
+            {
+                hashrate_1m_24h.push_back(p);
+            }
+            while hashrate_1m_24h.len() > DEFAULT_HASHRATE_POINTS_24H_1M {
+                hashrate_1m_24h.pop_front();
+            }
+        }
+
         let inner = Inner {
             snapshot,
             recent_shares,
             recent_blocks,
             recent_payouts,
+            hashrate_1m_24h,
             dirty: false,
             state_file: state_path,
             ledger_enable,
@@ -308,6 +360,9 @@ impl PoolState {
         g.snapshot.recent_shares = g.recent_shares.iter().cloned().collect();
         g.snapshot.recent_blocks = g.recent_blocks.iter().cloned().collect();
         g.snapshot.recent_payouts = g.recent_payouts.iter().cloned().collect();
+
+        // Timeseries into snapshot (NEW)
+        g.snapshot.timeseries.hashrate_1m_24h = g.hashrate_1m_24h.iter().cloned().collect();
 
         g.snapshot.clone()
     }
@@ -349,7 +404,12 @@ impl PoolState {
             PoolEvent::ShareRejected { .. } => {
                 g.snapshot.totals.shares_rej = g.snapshot.totals.shares_rej.saturating_add(1);
             }
-            PoolEvent::BlockFound { height, hash, timestamp, .. } => {
+            PoolEvent::BlockFound {
+                height,
+                hash,
+                timestamp,
+                ..
+            } => {
                 g.snapshot.totals.blocks_found = g.snapshot.totals.blocks_found.saturating_add(1);
                 g.snapshot.last_block.height = *height;
                 g.snapshot.last_block.hash = hash.clone();
@@ -369,7 +429,9 @@ impl PoolState {
                 ..
             } => {
                 let paid_to_miners = if !payouts.is_empty() {
-                    payouts.iter().fold(0u64, |acc, p| acc.saturating_add(p.amount))
+                    payouts
+                        .iter()
+                        .fold(0u64, |acc, p| acc.saturating_add(p.amount))
                 } else {
                     total_reward.saturating_sub(*pool_fee)
                 };
@@ -403,6 +465,25 @@ impl PoolState {
         g.dirty = true;
     }
 
+    // ── Timeseries API (NEW) ────────────────────────────────────────────────
+    //
+    // Call this from your stats loop (e.g. every 60s) with your computed pool
+    // hashrate in H/s. This persists to pool_state.json and rehydrates on boot.
+    pub async fn record_hashrate_sample(&self, hashrate_hs: f64) {
+        let mut g = self.inner.lock().await;
+
+        g.hashrate_1m_24h.push_back(TimeSeriesPoint {
+            t: now_ts(),
+            v: hashrate_hs,
+        });
+
+        while g.hashrate_1m_24h.len() > DEFAULT_HASHRATE_POINTS_24H_1M {
+            g.hashrate_1m_24h.pop_front();
+        }
+
+        g.dirty = true;
+    }
+
     fn spawn_flush_task(&self) {
         let this = self.clone();
         tokio::spawn(async move {
@@ -419,6 +500,9 @@ impl PoolState {
                 g.snapshot.recent_shares = g.recent_shares.iter().cloned().collect();
                 g.snapshot.recent_blocks = g.recent_blocks.iter().cloned().collect();
                 g.snapshot.recent_payouts = g.recent_payouts.iter().cloned().collect();
+
+                // Timeseries into snapshot (NEW)
+                g.snapshot.timeseries.hashrate_1m_24h = g.hashrate_1m_24h.iter().cloned().collect();
 
                 let path = g.state_file.clone();
                 let json = match serde_json::to_vec_pretty(&g.snapshot) {
@@ -635,6 +719,6 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.1.1-three-buffers-borrowfix.1
+// Version: 1.1.2-timeseries-hashrate24h.1
 // Updated: 2026-02-13
 // ============================================================================

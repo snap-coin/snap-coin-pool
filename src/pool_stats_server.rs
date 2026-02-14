@@ -1,7 +1,7 @@
 // ============================================================================
 // File: pool_stats_server.rs
 // Location: snap-coin-pool-v2/src/pool_stats_server.rs
-// Version: 1.4.1-poolstate-external.1
+// Version: 1.4.2-timeseries-hashrate-sample.1
 //
 // Description: WebSocket stats server for real-time pool monitoring dashboard.
 //              Broadcasts pool events (miner connections, shares, blocks, payouts,
@@ -12,6 +12,12 @@
 //                - GET  /static/*     -> static assets (css/js/images, etc)
 //                - GET  /api/snapshot -> shared pool snapshot (state hydration)
 //                - WS   /ws           -> live event feed
+//
+// CHANGELOG (v1.4.2-timeseries-hashrate-sample.1):
+//   - Persist dashboard hashrate chart history:
+//       * Call PoolState::record_hashrate_sample() from NetworkStats emitter
+//       * Rate-limit samples to 1/min (matches 24h @ 1m ring buffer in PoolState)
+//   - No other behavior changes.
 //
 // CHANGELOG (v1.4.1-poolstate-external.1):
 //   - Remove inline `mod poolstate { ... }`.
@@ -370,7 +376,6 @@ fn spawn_network_stats_tasks(event_tx: broadcast::Sender<PoolEvent>, pool_state:
         if let Err(e) = res {
             tracing::warn!("[NET] event listener ended: {}", e);
         }
-
     });
 
     // 2) Poll node: height/reward/block_target/last_hash once per second
@@ -440,6 +445,9 @@ fn spawn_network_stats_tasks(event_tx: broadcast::Sender<PoolEvent>, pool_state:
         let thirty_five = BigUint::from(35u32);
         let zero = BigUint::from(0u32);
 
+        // NEW: hashrate sampling gate (1/min) for persistent dashboard chart history
+        let mut last_hashrate_sample_ts: u64 = 0;
+
         loop {
             tick.tick().await;
 
@@ -456,11 +464,27 @@ fn spawn_network_stats_tasks(event_tx: broadcast::Sender<PoolEvent>, pool_state:
             };
 
             let target = BigUint::from_bytes_be(&s.block_target_32);
-            let difficulty_big = if target == zero { BigUint::from(0u32) } else { &max_target / &target };
-            let hashrate_big = if difficulty_big == zero { BigUint::from(0u32) } else { &difficulty_big / &thirty_five };
+            let difficulty_big = if target == zero {
+                BigUint::from(0u32)
+            } else {
+                &max_target / &target
+            };
+            let hashrate_big = if difficulty_big == zero {
+                BigUint::from(0u32)
+            } else {
+                &difficulty_big / &thirty_five
+            };
 
             let difficulty_u64 = biguint_to_u64_clamped(&difficulty_big);
             let hashrate_u64 = biguint_to_u64_clamped(&hashrate_big);
+
+            // NEW: persist hashrate samples for snapshot hydration (1 sample / 60s)
+            if last_hashrate_sample_ts == 0 || now.saturating_sub(last_hashrate_sample_ts) >= 5 {
+                pool_state
+                    .record_hashrate_sample(hashrate_u64 as f64)
+                    .await;
+                last_hashrate_sample_ts = now;
+            }
 
             let evt = PoolEvent::NetworkStats {
                 hashrate_hs: hashrate_u64,
@@ -503,6 +527,6 @@ fn now_ts() -> u64 {
 // ============================================================================
 // File: pool_stats_server.rs
 // Location: snap-coin-pool-v2/src/pool_stats_server.rs
-// Version: 1.4.1-poolstate-external.1
-// Updated: 2026-02-11
+// Version: 1.4.2-timeseries-hashrate-sample.1
+// Updated: 2026-02-13
 // ============================================================================
