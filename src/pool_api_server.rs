@@ -1,7 +1,7 @@
 // ============================================================================
 // File: pool_api_server.rs
 // Location: snap-coin-pool-v2/src/pool_api_server.rs
-// Version: 0.1.4-stats.14
+// Version: 0.1.4-stats.16
 //
 // Description:
 // Upstream pool API server (logic preserved) with OPTIONAL instrumentation hooks
@@ -25,6 +25,15 @@
 // - Fix borrow checker error in try_register_connection(): avoid holding two
 //   mutable borrows into the ActiveConns struct simultaneously.
 // - Remove unused last_rx_ts assignment (passive heartbeat uses timeout wrapper).
+//
+// FIX (v0.1.4-stats.15):
+// - ShareAccepted height telemetry: remove incorrect `last_block_height`
+//   (node_height-1) and emit the mined job height as `node_height + 1`.
+//   This aligns ShareAccepted display with the "next block being solved" semantic.
+//
+// FIX (v0.1.4-stats.16):
+// - BlockFound/PayoutComplete height telemetry: remove incorrect `node_height-1`
+//   and emit `node_height` directly after submit, matching explorer height.
 // ============================================================================
 
 use anyhow::anyhow;
@@ -359,11 +368,12 @@ impl PoolServer {
                                         Some(c) => c.get_height().await.unwrap_or(0) as u64,
                                         None => 0,
                                     };
-                                    let last_block_height = node_height.saturating_sub(1);
 
+                                    // FIX v0.1.4-stats.15:
+                                    // Emit the *job* height being solved (tip + 1), not last_block_height (tip - 1).
                                     self.emit(PoolEvent::ShareAccepted {
                                         miner: miner_key.clone(),
-                                        height: last_block_height,
+                                        height: node_height.saturating_add(1),
                                         work_units: 1,
                                         work_total: 1,
                                         timestamp: now_ts(),
@@ -512,12 +522,13 @@ impl PoolServer {
                         println!("[POOL] Pool mined new block!");
 
                         let node_height = submit_client.get_height().await.unwrap_or(0) as u64;
-                        let last_block_height = node_height.saturating_sub(1);
                         let reward = submit_client.get_reward().await.unwrap_or(0);
 
+                        // FIX v0.1.4-stats.16:
+                        // Emit node_height directly (no -1).
                         self_clone
                             .emit(PoolEvent::BlockFound {
-                                height: last_block_height,
+                                height: node_height,
                                 hash: format!("{:?}", block.meta.hash),
                                 reward,
                                 timestamp: now_ts(),
@@ -544,9 +555,11 @@ impl PoolServer {
                                 })
                                 .collect();
 
+                            // FIX v0.1.4-stats.16:
+                            // Emit node_height directly (no -1).
                             self_clone
                                 .emit(PoolEvent::PayoutComplete {
-                                    height: last_block_height,
+                                    height: node_height,
                                     miners_paid: m.miners_paid,
                                     total_reward: m.coinbase_amount,
                                     pool_fee: m.pool_fee_amount,
@@ -692,6 +705,9 @@ fn now_ts() -> u64 {
 // ============================================================================
 // File: pool_api_server.rs
 // Location: snap-coin-pool-v2/src/pool_api_server.rs
-// Version: 0.1.4-stats.14
-// Updated: 2026-02-12
+// Version: 0.1.4-stats.16
+// Updated: 2026-02-14
+// ============================================================================
+// Generated: 2026-02-14T00:00:00Z
+// LOC: (not auto-counted)
 // ============================================================================
