@@ -1,14 +1,13 @@
 <!-- =========================================================================
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
-Version: 1.5.2-compact.12
+Version: 1.5.3-compact.13
 
-Changes from v1.5.1-compact.11:
-  - Restore smooth "old method" chart behavior (no periodic flicker):
-      * Fetch /api/snapshot ONCE (seed arrays) instead of polling
-      * Charts redraw ONLY when chart data changes, mode changes, or resize
-      * updateKpis() no longer redraws charts (KPIs can refresh without chart repaint)
-      * requestAnimationFrame scheduler to coalesce chart draws
+Changes from v1.5.2-compact.12:
+  - Accept new backend state params for hourly block buckets:
+      * Hydrate state.blocksByHour from snapshot.timeseries.blocks_1d (24 hourly points)
+      * Map snapshot points to the dashboard’s rolling “last 24 hours” keys (hourKeyFromNowHours)
+      * Keeps existing smooth/no-flicker behavior (no periodic snapshot polling)
   - No other layout/logic changes.
 ========================================================================  -->
 <!DOCTYPE html>
@@ -1061,7 +1060,7 @@ Changes from v1.5.1-compact.11:
       }
     }
 
-    // Hydrate daily_buckets into blocksByDay
+    // Hydrate daily_buckets into blocksByDay (7d/30d view)
     const buckets = snap.daily_buckets || snap.dailyBuckets || [];
     if (Array.isArray(buckets)) {
       for (const b of buckets) {
@@ -1071,8 +1070,50 @@ Changes from v1.5.1-compact.11:
           state.blocksByDay[dateKey] = Number(b.blocks);
         }
       }
-      markChartsDirty("blocks");
     }
+
+    // ---------------------------------------------------------------------
+    // v1.5.3 FIX: Hydrate HOURLY buckets for 1d view from timeseries.blocks_1d
+    // Backend provides 24 points. We map them to our rolling hour keys
+    // (hourKeyFromNowHours) to avoid timezone/UTC boundary mismatches.
+    // ---------------------------------------------------------------------
+    (function hydrateBlocksHourlyFromSnapshot(){
+      const ts = (tsRoot && Array.isArray(tsRoot.blocks_1d)) ? tsRoot.blocks_1d : null;
+      if(!Array.isArray(ts) || ts.length === 0) return;
+
+      // Extract numeric points (t seconds, v blocks)
+      const pts = ts
+        .map(p => {
+          const t = (p && p.t !== undefined && p.t !== null) ? Number(p.t) : NaN;
+          const v = (p && p.v !== undefined && p.v !== null) ? Number(p.v) : NaN;
+          if(!isFinite(t) || !isFinite(v)) return null;
+          return { t, v };
+        })
+        .filter(p => p && isFinite(p.t) && isFinite(p.v))
+        .sort((a,b) => a.t - b.t);
+
+      if(pts.length === 0) return;
+
+      // Take last 24 (or fewer) and left-pad with zeros to 24.
+      const take = Math.min(24, pts.length);
+      const tail = pts.slice(pts.length - take).map(p => Math.max(0, Math.floor(p.v)));
+      const vals = [];
+      const pad = 24 - tail.length;
+      for(let i=0;i<pad;i++) vals.push(0);
+      for(const v of tail) vals.push(v);
+
+      // Map oldest->23h ago ... newest->0h ago
+      const out = {};
+      for(let i=23, idx=0; i>=0; i--, idx++){
+        const k = hourKeyFromNowHours(i);
+        out[k] = Number(vals[idx] || 0);
+      }
+      state.blocksByHour = out;
+      pruneBlocksByHour();
+
+      // mark blocks chart dirty after snapshot hydration
+      markChartsDirty("blocks");
+    })();
 
     updateKpis();
 
@@ -1727,9 +1768,6 @@ Changes from v1.5.1-compact.11:
       return;
     }
 
-    // -------------------------------
-    // FIX: percentile-clamped autoscale
-    // -------------------------------
     function quantile(sortedVals, q){
       const n = sortedVals.length;
       if(n === 0) return NaN;
@@ -1745,13 +1783,11 @@ Changes from v1.5.1-compact.11:
     const vals = pts.map(p => p.v).filter(v => isFinite(v)).slice().sort((a,b) => a - b);
     if(vals.length < 2) return;
 
-    // Use a stable floor (0) so we don't “zoom” weirdly as low values change.
-    // If you prefer dynamic min, change minV to quantile(vals, 0.05).
     let minV = 0;
 
     const rawMax = vals[vals.length - 1];
-    const p95 = quantile(vals, 0.99);          // main scale target
-    const maxV = Math.max(1, p95, minV + 1);   // prevent degenerate scale
+    const p95 = quantile(vals, 0.99);
+    const maxV = Math.max(1, p95, minV + 1);
 
     const padL = 10;
     const padR = 10;
@@ -1765,7 +1801,6 @@ Changes from v1.5.1-compact.11:
       return padL + ((t - t0) / windowMs) * innerW;
     }
 
-    // Clamp values above maxV so spikes clip instead of flattening the chart
     function yFor(v){
       const vv = (v > maxV) ? maxV : v;
       return padT + (1 - ((vv - minV) / (maxV - minV))) * innerH;
@@ -1789,12 +1824,10 @@ Changes from v1.5.1-compact.11:
     hrChartCtx.fillStyle = "rgba(255,255,255,0.55)";
     hrChartCtx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
 
-    // Display both the scale max (p95) and the true peak (rawMax) for transparency
     hrChartCtx.fillText(`scale_max(p95)=${fmtHashrate(maxV)}`, 12, 12);
     const peakStr = `peak=${fmtHashrate(rawMax)}`;
     hrChartCtx.fillText(peakStr, Math.max(12, w - 12 - peakStr.length * 6), 12);
   }
-
 
   // v1.5.2: KPIs update does NOT redraw charts
   function updateKpis(){
@@ -2155,7 +2188,7 @@ Changes from v1.5.1-compact.11:
             bumpBlocksThisHour();
             savePersisted();
 
-            // v1.5.2: redraw blocks chart ONLY when buckets change
+            // redraw blocks chart ONLY when buckets change
             markChartsDirty("blocks");
           }
         }
@@ -2538,6 +2571,6 @@ Changes from v1.5.1-compact.11:
 <!-- =========================================================================
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
-Version: 1.5.2-compact.12
+Version: 1.5.3-compact.13
 Created: 2026-02-14T00:00:00Z
 ========================================================================  -->

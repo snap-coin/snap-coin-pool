@@ -1,7 +1,7 @@
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.1.2-timeseries-hashrate24h.1
+// Version: 1.1.5-timeseries-blocks1d-hourly-borrowfix.1
 //
 // Description: Server-side shared pool state (snapshot hydration) + lightweight
 //              disk persistence (no DB).
@@ -24,16 +24,16 @@
 //   - NetworkStats is hard-ignored (not persisted, not stored in any buffer).
 //   - Daily buckets bounded (default 30 days).
 //   - Uses internal UTC day formatter (civil_from_days) to avoid chrono.
-//   - NEW: Persistent timeseries (hashrate_1m_24h) stored inside pool_state.json.
+//   - Persistent timeseries stored inside pool_state.json.
 //
-// CHANGELOG (v1.1.2-timeseries-hashrate24h.1):
-//   - Add snapshot.timeseries.hashrate_1m_24h with 24h rolling buffer (1440 points).
-//   - Add PoolState::record_hashrate_sample(f64) to append periodic samples.
-//   - Rehydrate/persist timeseries via pool_state.json.
+// CHANGELOG (v1.1.5-timeseries-blocks1d-hourly-borrowfix.1):
+//   - FIX: borrow-checker E0502 by cloning recent_blocks into a local before
+//          rebuilding hourly blocks_1d timeseries (3 call sites).
+//   - No functional behavior change.
 // ============================================================================
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -56,6 +56,9 @@ const DEFAULT_RECENT_PAYOUTS: usize = 200;
 
 // Timeseries caps.
 const DEFAULT_HASHRATE_POINTS_24H_1M: usize = 1440; // 24h @ 1 sample/min
+
+// blocks_1d hourly points (24 hours)
+const DEFAULT_BLOCKS_1D_HOURLY_POINTS: i64 = 24;
 
 // ── Env parsing helpers ─────────────────────────────────────────────────────
 
@@ -120,12 +123,12 @@ pub struct LastPayout {
     pub timestamp: u64,
 }
 
-// ── Persistent time series (NEW) ────────────────────────────────────────────
+// ── Persistent time series ──────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct TimeSeriesPoint {
-    pub t: u64,   // unix seconds
-    pub v: f64,   // value (e.g. hashrate H/s)
+    pub t: u64, // unix seconds (bucket start, UTC)
+    pub v: f64, // numeric value
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -133,6 +136,18 @@ pub struct TimeSeries {
     // 24h rolling buffer sampled (typically) at 1 minute cadence.
     #[serde(default)]
     pub hashrate_1m_24h: Vec<TimeSeriesPoint>,
+
+    // HOURLY block count buckets, derived from recent_blocks timestamps.
+    // Filled with 0 for missing hours.
+    #[serde(default)]
+    pub blocks_1d: Vec<TimeSeriesPoint>, // length 24 (hour buckets)
+
+    // DAILY block count buckets, derived from daily_buckets (fills missing days w/0).
+    // These are persisted for dumb frontend consumption.
+    #[serde(default)]
+    pub blocks_7d: Vec<TimeSeriesPoint>, // length 7
+    #[serde(default)]
+    pub blocks_30d: Vec<TimeSeriesPoint>, // length 30
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -160,7 +175,7 @@ pub struct PoolSnapshot {
     #[serde(default)]
     pub pool_difficulty_fixed_num: u64,
 
-    // Persistent timeseries (NEW)
+    // Persistent timeseries
     #[serde(default)]
     pub timeseries: TimeSeries,
 }
@@ -196,7 +211,7 @@ struct Inner {
     recent_blocks: VecDeque<PoolEvent>,
     recent_payouts: VecDeque<PoolEvent>,
 
-    // Timeseries in-memory deques (NEW)
+    // Timeseries in-memory deques
     hashrate_1m_24h: VecDeque<TimeSeriesPoint>,
 
     dirty: bool,
@@ -316,7 +331,7 @@ impl PoolState {
         snapshot.recent_blocks = recent_blocks.iter().cloned().collect();
         snapshot.recent_payouts = recent_payouts.iter().cloned().collect();
 
-        // ── Timeseries rehydrate (NEW) ───────────────────────────────────────
+        // ── Timeseries rehydrate (hashrate) ──────────────────────────────────
         let mut hashrate_1m_24h = VecDeque::with_capacity(DEFAULT_HASHRATE_POINTS_24H_1M);
         if !snapshot.timeseries.hashrate_1m_24h.is_empty() {
             for p in snapshot
@@ -332,6 +347,10 @@ impl PoolState {
                 hashrate_1m_24h.pop_front();
             }
         }
+
+        // ── Timeseries rebuild (blocks) ──────────────────────────────────────
+        rebuild_block_timeseries_daily_from_daily(&mut snapshot);
+        rebuild_block_timeseries_hourly_1d_from_recent_blocks(&mut snapshot, &recent_blocks);
 
         let inner = Inner {
             snapshot,
@@ -361,8 +380,15 @@ impl PoolState {
         g.snapshot.recent_blocks = g.recent_blocks.iter().cloned().collect();
         g.snapshot.recent_payouts = g.recent_payouts.iter().cloned().collect();
 
-        // Timeseries into snapshot (NEW)
+        // Timeseries into snapshot
         g.snapshot.timeseries.hashrate_1m_24h = g.hashrate_1m_24h.iter().cloned().collect();
+
+        // Blocks series (ensure up-to-date even if client polls infrequently)
+        rebuild_block_timeseries_daily_from_daily(&mut g.snapshot);
+
+        // FIX: avoid E0502 by cloning recent_blocks first
+        let recent_blocks = g.recent_blocks.clone();
+        rebuild_block_timeseries_hourly_1d_from_recent_blocks(&mut g.snapshot, &recent_blocks);
 
         g.snapshot.clone()
     }
@@ -417,6 +443,13 @@ impl PoolState {
 
                 bump_daily_blocks(&mut g.snapshot.daily_buckets, *timestamp);
                 truncate_daily(&mut g.snapshot.daily_buckets);
+
+                // Rebuild derived blocks series for dumb frontend.
+                rebuild_block_timeseries_daily_from_daily(&mut g.snapshot);
+
+                // FIX: avoid E0502 by cloning recent_blocks first
+                let recent_blocks = g.recent_blocks.clone();
+                rebuild_block_timeseries_hourly_1d_from_recent_blocks(&mut g.snapshot, &recent_blocks);
             }
             PoolEvent::PayoutComplete {
                 height,
@@ -465,7 +498,7 @@ impl PoolState {
         g.dirty = true;
     }
 
-    // ── Timeseries API (NEW) ────────────────────────────────────────────────
+    // ── Timeseries API ──────────────────────────────────────────────────────
     //
     // Call this from your stats loop (e.g. every 60s) with your computed pool
     // hashrate in H/s. This persists to pool_state.json and rehydrates on boot.
@@ -501,8 +534,15 @@ impl PoolState {
                 g.snapshot.recent_blocks = g.recent_blocks.iter().cloned().collect();
                 g.snapshot.recent_payouts = g.recent_payouts.iter().cloned().collect();
 
-                // Timeseries into snapshot (NEW)
+                // Timeseries into snapshot
                 g.snapshot.timeseries.hashrate_1m_24h = g.hashrate_1m_24h.iter().cloned().collect();
+
+                // Derived blocks series
+                rebuild_block_timeseries_daily_from_daily(&mut g.snapshot);
+
+                // FIX: avoid E0502 by cloning recent_blocks first
+                let recent_blocks = g.recent_blocks.clone();
+                rebuild_block_timeseries_hourly_1d_from_recent_blocks(&mut g.snapshot, &recent_blocks);
 
                 let path = g.state_file.clone();
                 let json = match serde_json::to_vec_pretty(&g.snapshot) {
@@ -609,6 +649,90 @@ fn bump_daily_paid(buckets: &mut Vec<DailyBucket>, ts: u64, paid: u64) {
         blocks: 0,
         paid,
     });
+}
+
+/// Rebuild blocks_{7d,30d} DAILY series from snapshot.daily_buckets.
+/// - Ensures contiguous buckets ending "today" (UTC), filling missing days with 0.
+/// - Stores t = day-start unix seconds (UTC), v = blocks as f64.
+fn rebuild_block_timeseries_daily_from_daily(snapshot: &mut PoolSnapshot) {
+    let today_days = (now_ts() / 86_400) as i64;
+
+    // Map "YYYY-MM-DD" -> blocks
+    let mut map: HashMap<String, u64> = HashMap::new();
+    for b in snapshot.daily_buckets.iter() {
+        map.insert(b.date.clone(), b.blocks);
+    }
+
+    snapshot.timeseries.blocks_7d = build_blocks_series_days(&map, today_days, 7);
+    snapshot.timeseries.blocks_30d = build_blocks_series_days(&map, today_days, 30);
+}
+
+/// Rebuild blocks_1d HOURLY series (24 points) from recent_blocks timestamps.
+/// - Buckets are UTC hour-start: (ts / 3600) * 3600
+/// - Window is the last 24 hours ending at the current UTC hour bucket (inclusive).
+/// - Missing hours filled with 0.
+/// - Stores t = hour-start unix seconds (UTC), v = blocks as f64.
+fn rebuild_block_timeseries_hourly_1d_from_recent_blocks(
+    snapshot: &mut PoolSnapshot,
+    recent_blocks: &VecDeque<PoolEvent>,
+) {
+    let now = now_ts();
+    let end_hour = (now / 3_600) * 3_600; // UTC hour bucket start
+    let start_hour = end_hour
+        .saturating_sub((DEFAULT_BLOCKS_1D_HOURLY_POINTS as u64).saturating_sub(1) * 3_600);
+
+    // Count blocks per hour within [start_hour, end_hour]
+    let mut counts: HashMap<u64, u64> = HashMap::new();
+
+    for e in recent_blocks.iter() {
+        if let PoolEvent::BlockFound { timestamp, .. } = e {
+            let ts = *timestamp;
+            if ts < start_hour || ts > (end_hour + 3_600 - 1) {
+                continue;
+            }
+            let hour = (ts / 3_600) * 3_600;
+            if hour < start_hour || hour > end_hour {
+                continue;
+            }
+            *counts.entry(hour).or_insert(0) = counts
+                .get(&hour)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
+        }
+    }
+
+    let mut out = Vec::with_capacity(DEFAULT_BLOCKS_1D_HOURLY_POINTS as usize);
+    let mut h = start_hour;
+    while h <= end_hour {
+        let c = counts.get(&h).copied().unwrap_or(0);
+        out.push(TimeSeriesPoint { t: h, v: c as f64 });
+        h = h.saturating_add(3_600);
+        if out.len() >= DEFAULT_BLOCKS_1D_HOURLY_POINTS as usize {
+            break;
+        }
+    }
+
+    snapshot.timeseries.blocks_1d = out;
+}
+
+fn build_blocks_series_days(
+    map: &HashMap<String, u64>,
+    today_days: i64,
+    n_days: i64,
+) -> Vec<TimeSeriesPoint> {
+    let mut out = Vec::with_capacity(n_days as usize);
+    let start_days = today_days - (n_days - 1);
+    for d in start_days..=today_days {
+        let ts = (d as u64).saturating_mul(86_400);
+        let key = utc_day_string(ts);
+        let blocks = *map.get(&key).unwrap_or(&0u64);
+        out.push(TimeSeriesPoint {
+            t: ts,
+            v: blocks as f64,
+        });
+    }
+    out
 }
 
 fn append_ledger_line(ledger_dir: &Path, ts: u64, event: &PoolEvent) -> anyhow::Result<()> {
@@ -719,6 +843,6 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.1.2-timeseries-hashrate24h.1
-// Updated: 2026-02-13
+// Version: 1.1.5-timeseries-blocks1d-hourly-borrowfix.1
+// Updated: 2026-02-14
 // ============================================================================
