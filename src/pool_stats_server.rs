@@ -1,7 +1,7 @@
 // ============================================================================
 // File: pool_stats_server.rs
 // Location: snap-coin-pool-v2/src/pool_stats_server.rs
-// Version: 1.4.2-timeseries-hashrate-sample.1
+// Version: 1.4.3-timeseries-hashrate-sample.2
 //
 // Description: WebSocket stats server for real-time pool monitoring dashboard.
 //              Broadcasts pool events (miner connections, shares, blocks, payouts,
@@ -12,6 +12,14 @@
 //                - GET  /static/*     -> static assets (css/js/images, etc)
 //                - GET  /api/snapshot -> shared pool snapshot (state hydration)
 //                - WS   /ws           -> live event feed
+//
+// CHANGELOG (v1.4.3-timeseries-hashrate-sample.2):
+//   - Fix hashrate chart “startup seed” contamination in pool_state.json:
+//       * Only persist a hashrate sample if NEW accepted shares occurred since
+//         the last sample AND a share was accepted recently.
+//         (prevents recording difficulty-derived "network hashrate" at idle boot)
+//   - Correct sampling interval to 1/min (was accidentally 5s).
+//   - No other behavior changes.
 //
 // CHANGELOG (v1.4.2-timeseries-hashrate-sample.1):
 //   - Persist dashboard hashrate chart history:
@@ -64,7 +72,7 @@ use snap_coin::api::client::Client;
 use snap_coin::blockchain_data_provider::BlockchainDataProvider;
 use snap_coin::full_node::node_state::ChainEvent;
 
-// External persistent state module (your new file).
+// External persistent state module.
 use crate::poolstate::{PoolSnapshot, PoolState};
 
 // ── Pool events ─────────────────────────────────────────────────────────────
@@ -445,8 +453,16 @@ fn spawn_network_stats_tasks(event_tx: broadcast::Sender<PoolEvent>, pool_state:
         let thirty_five = BigUint::from(35u32);
         let zero = BigUint::from(0u32);
 
-        // NEW: hashrate sampling gate (1/min) for persistent dashboard chart history
+        // Persist hashrate samples for snapshot hydration (1 sample / 60s),
+        // but ONLY when NEW accepted shares are arriving (prevents idle boot seeding).
         let mut last_hashrate_sample_ts: u64 = 0;
+
+        // Track accepted-share counter at last sample boundary.
+        // Initialize from persisted state so we don't treat old shares as "new".
+        let mut last_sample_shares_acc: u64 = pool_state.snapshot().await.totals.shares_acc;
+
+        // Consider pool "active" if a ShareAccepted occurred recently.
+        const SHARE_RECENT_SECS: u64 = 120;
 
         loop {
             tick.tick().await;
@@ -478,12 +494,30 @@ fn spawn_network_stats_tasks(event_tx: broadcast::Sender<PoolEvent>, pool_state:
             let difficulty_u64 = biguint_to_u64_clamped(&difficulty_big);
             let hashrate_u64 = biguint_to_u64_clamped(&hashrate_big);
 
-            // NEW: persist hashrate samples for snapshot hydration (1 sample / 60s)
-            if last_hashrate_sample_ts == 0 || now.saturating_sub(last_hashrate_sample_ts) >= 5 {
-                pool_state
-                    .record_hashrate_sample(hashrate_u64 as f64)
-                    .await;
-                last_hashrate_sample_ts = now;
+            // Persist hashrate sample at 1/min, BUT ONLY if:
+            //  - shares_acc increased since last sample, AND
+            //  - a ShareAccepted event is recent (pool is actively mining now).
+            if last_hashrate_sample_ts == 0 || now.saturating_sub(last_hashrate_sample_ts) >= 60 {
+                let snap = pool_state.snapshot().await;
+
+                // Find most recent ShareAccepted timestamp from recent_shares (best-effort).
+                let mut last_share_ts: u64 = 0;
+                for e in snap.recent_shares.iter().rev() {
+                    if let PoolEvent::ShareAccepted { timestamp, .. } = e {
+                        last_share_ts = *timestamp;
+                        break;
+                    }
+                }
+
+                let shares_acc_now = snap.totals.shares_acc;
+                let has_new_shares = shares_acc_now > last_sample_shares_acc;
+                let share_is_recent = last_share_ts != 0 && now.saturating_sub(last_share_ts) <= SHARE_RECENT_SECS;
+
+                if has_new_shares && share_is_recent {
+                    pool_state.record_hashrate_sample(hashrate_u64 as f64).await;
+                    last_hashrate_sample_ts = now;
+                    last_sample_shares_acc = shares_acc_now;
+                }
             }
 
             let evt = PoolEvent::NetworkStats {
@@ -527,6 +561,6 @@ fn now_ts() -> u64 {
 // ============================================================================
 // File: pool_stats_server.rs
 // Location: snap-coin-pool-v2/src/pool_stats_server.rs
-// Version: 1.4.2-timeseries-hashrate-sample.1
-// Updated: 2026-02-13
+// Version: 1.4.3-timeseries-hashrate-sample.2
+// Updated: 2026-02-14
 // ============================================================================
