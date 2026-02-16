@@ -1,7 +1,7 @@
 // ============================================================================
 // File: pool_api_server.rs
 // Location: snap-coin-pool-v2/src/pool_api_server.rs
-// Version: 0.1.4-stats.16
+// Version: 0.1.4-stats.17
 //
 // Description:
 // Upstream pool API server (logic preserved) with OPTIONAL instrumentation hooks
@@ -34,6 +34,10 @@
 // FIX (v0.1.4-stats.16):
 // - BlockFound/PayoutComplete height telemetry: remove incorrect `node_height-1`
 //   and emit `node_height` directly after submit, matching explorer height.
+//
+// FIX (v0.1.4-stats.17):
+// - Do NOT create a node API client per incoming miner connection.
+//   Create a single shared Client once at server start and reuse via Arc.
 // ============================================================================
 
 use anyhow::anyhow;
@@ -306,6 +310,8 @@ impl PoolServer {
         ip: String,
         submit_block: mpsc::Sender<(Block, Public)>,
         job_handler: Arc<JobHandler>,
+        // v0.1.4-stats.17: shared node API client (NO per-miner connect)
+        height_client: Option<Arc<Client>>,
     ) {
         let miner_key = format!("{:?}", client_address);
         let mut reject_streak: u32 = 0;
@@ -316,8 +322,6 @@ impl PoolServer {
             timestamp: now_ts(),
         })
         .await;
-
-        let height_client: Option<Client> = Client::connect(self.pool_api).await.ok();
 
         loop {
             // Passive heartbeat: if no request arrives within HEARTBEAT_IDLE_SECS, drop connection.
@@ -506,6 +510,11 @@ impl PoolServer {
             Self::score_decay_task(ip_scores_clone).await;
         });
 
+        // v0.1.4-stats.17: shared node API client (used for per-miner height telemetry)
+        // NOTE: best-effort; if connect fails we still run, just emit height=0.
+        let shared_height_client: Option<Arc<Client>> =
+            Client::connect(self.pool_api).await.ok().map(Arc::new);
+
         let (submit_tx, mut submit_rx) = mpsc::channel(24);
         let self_clone = self.clone();
 
@@ -613,6 +622,7 @@ impl PoolServer {
                 let (mut stream, addr) = res.unwrap();
                 let submit_tx = submit_tx.clone();
                 let self_clone = self_clone.clone();
+                let shared_height_client = shared_height_client.clone();
 
                 if let Err(e) = async move {
                     let ip = Self::extract_ip(&addr);
@@ -622,6 +632,7 @@ impl PoolServer {
                         let self_clone2 = self_clone.clone();
                         let ip_clone = ip.clone();
                         let ip_for_handshake = ip.clone();
+                        let shared_height_client = shared_height_client.clone();
 
                         match timeout(
                             Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
@@ -656,6 +667,7 @@ impl PoolServer {
                                     ip_clone,
                                     submit_tx,
                                     job_handler.clone(),
+                                    shared_height_client,
                                 ));
 
                                 Ok::<(), anyhow::Error>(())
@@ -705,9 +717,9 @@ fn now_ts() -> u64 {
 // ============================================================================
 // File: pool_api_server.rs
 // Location: snap-coin-pool-v2/src/pool_api_server.rs
-// Version: 0.1.4-stats.16
-// Updated: 2026-02-14
+// Version: 0.1.4-stats.17
+// Updated: 2026-02-16
 // ============================================================================
-// Generated: 2026-02-14T00:00:00Z
+// Generated: 2026-02-16T00:00:00Z
 // LOC: (not auto-counted)
 // ============================================================================
