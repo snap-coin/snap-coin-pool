@@ -1,9 +1,9 @@
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.1.5-timeseries-blocks1d-hourly-borrowfix.1
+// Version: 1.1.6-timeseries-dual-hashrate24h.1
 //
-// Description: Server-side shared pool state (snapshot hydration) + lightweight
+// Description: Server-side shared pool state (snapshot loading) + lightweight
 //              disk persistence (no DB).
 //
 //              Provides:
@@ -21,15 +21,18 @@
 //       * recent_blocks  (default 200)   - BlockFound events
 //       * recent_payouts (default 200)   - PayoutComplete events
 //   - Each buffer has its own cap.
-//   - NetworkStats is hard-ignored (not persisted, not stored in any buffer).
+//   - NetworkStats is NOT stored in any recent_* buffer, but its hashrate value
+//     IS recorded into a dedicated 24h timeseries for frontend clarity.
 //   - Daily buckets bounded (default 30 days).
 //   - Uses internal UTC day formatter (civil_from_days) to avoid chrono.
 //   - Persistent timeseries stored inside pool_state.json.
 //
-// CHANGELOG (v1.1.5-timeseries-blocks1d-hourly-borrowfix.1):
-//   - FIX: borrow-checker E0502 by cloning recent_blocks into a local before
-//          rebuilding hourly blocks_1d timeseries (3 call sites).
-//   - No functional behavior change.
+// CHANGELOG (v1.1.6-timeseries-dual-hashrate24h.1):
+//   - ADD: Persist TWO distinct 24h hashrate series into pool_state.json:
+//       * timeseries.pool_hashrate_1m_24h    (pool hashrate samples)
+//       * timeseries.network_hashrate_1m_24h (network hashrate samples)
+//   - KEEP: NetworkStats stays out of recent event buffers.
+//   - REMOVE: any hashrate “cap/spike filter” behavior (not requested).
 // ============================================================================
 
 use std::{
@@ -55,7 +58,7 @@ const DEFAULT_RECENT_BLOCKS: usize = 200;
 const DEFAULT_RECENT_PAYOUTS: usize = 200;
 
 // Timeseries caps.
-const DEFAULT_HASHRATE_POINTS_24H_1M: usize = 1440; // 24h @ 1 sample/min
+const DEFAULT_HASHRATE_POINTS_24H_1M: usize = 5760; // 24h @ 1 sample/15seconds
 
 // blocks_1d hourly points (24 hours)
 const DEFAULT_BLOCKS_1D_HOURLY_POINTS: i64 = 24;
@@ -133,9 +136,15 @@ pub struct TimeSeriesPoint {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct TimeSeries {
-    // 24h rolling buffer sampled (typically) at 1 minute cadence.
+    // 24h rolling buffers sampled (typically) at 1 minute cadence.
+    //
+    // NOTE: alias keeps backward-compat with any older state files that used
+    //       timeseries.hashrate_1m_24h (it will land in pool_hashrate_1m_24h).
+    #[serde(default, alias = "hashrate_1m_24h")]
+    pub pool_hashrate_1m_24h: Vec<TimeSeriesPoint>,
+
     #[serde(default)]
-    pub hashrate_1m_24h: Vec<TimeSeriesPoint>,
+    pub network_hashrate_1m_24h: Vec<TimeSeriesPoint>,
 
     // HOURLY block count buckets, derived from recent_blocks timestamps.
     // Filled with 0 for missing hours.
@@ -212,7 +221,8 @@ struct Inner {
     recent_payouts: VecDeque<PoolEvent>,
 
     // Timeseries in-memory deques
-    hashrate_1m_24h: VecDeque<TimeSeriesPoint>,
+    pool_hashrate_1m_24h: VecDeque<TimeSeriesPoint>,
+    network_hashrate_1m_24h: VecDeque<TimeSeriesPoint>,
 
     dirty: bool,
     state_file: PathBuf,
@@ -331,20 +341,37 @@ impl PoolState {
         snapshot.recent_blocks = recent_blocks.iter().cloned().collect();
         snapshot.recent_payouts = recent_payouts.iter().cloned().collect();
 
-        // ── Timeseries rehydrate (hashrate) ──────────────────────────────────
-        let mut hashrate_1m_24h = VecDeque::with_capacity(DEFAULT_HASHRATE_POINTS_24H_1M);
-        if !snapshot.timeseries.hashrate_1m_24h.is_empty() {
+        // ── Timeseries load (pool hashrate) ──────────────────────────────────
+        let mut pool_hashrate_1m_24h = VecDeque::with_capacity(DEFAULT_HASHRATE_POINTS_24H_1M);
+        if !snapshot.timeseries.pool_hashrate_1m_24h.is_empty() {
             for p in snapshot
                 .timeseries
-                .hashrate_1m_24h
+                .pool_hashrate_1m_24h
                 .iter()
                 .cloned()
                 .take(DEFAULT_HASHRATE_POINTS_24H_1M)
             {
-                hashrate_1m_24h.push_back(p);
+                pool_hashrate_1m_24h.push_back(p);
             }
-            while hashrate_1m_24h.len() > DEFAULT_HASHRATE_POINTS_24H_1M {
-                hashrate_1m_24h.pop_front();
+            while pool_hashrate_1m_24h.len() > DEFAULT_HASHRATE_POINTS_24H_1M {
+                pool_hashrate_1m_24h.pop_front();
+            }
+        }
+
+        // ── Timeseries load (network hashrate) ───────────────────────────────
+        let mut network_hashrate_1m_24h = VecDeque::with_capacity(DEFAULT_HASHRATE_POINTS_24H_1M);
+        if !snapshot.timeseries.network_hashrate_1m_24h.is_empty() {
+            for p in snapshot
+                .timeseries
+                .network_hashrate_1m_24h
+                .iter()
+                .cloned()
+                .take(DEFAULT_HASHRATE_POINTS_24H_1M)
+            {
+                network_hashrate_1m_24h.push_back(p);
+            }
+            while network_hashrate_1m_24h.len() > DEFAULT_HASHRATE_POINTS_24H_1M {
+                network_hashrate_1m_24h.pop_front();
             }
         }
 
@@ -357,7 +384,8 @@ impl PoolState {
             recent_shares,
             recent_blocks,
             recent_payouts,
-            hashrate_1m_24h,
+            pool_hashrate_1m_24h,
+            network_hashrate_1m_24h,
             dirty: false,
             state_file: state_path,
             ledger_enable,
@@ -381,7 +409,9 @@ impl PoolState {
         g.snapshot.recent_payouts = g.recent_payouts.iter().cloned().collect();
 
         // Timeseries into snapshot
-        g.snapshot.timeseries.hashrate_1m_24h = g.hashrate_1m_24h.iter().cloned().collect();
+        g.snapshot.timeseries.pool_hashrate_1m_24h = g.pool_hashrate_1m_24h.iter().cloned().collect();
+        g.snapshot.timeseries.network_hashrate_1m_24h =
+            g.network_hashrate_1m_24h.iter().cloned().collect();
 
         // Blocks series (ensure up-to-date even if client polls infrequently)
         rebuild_block_timeseries_daily_from_daily(&mut g.snapshot);
@@ -394,7 +424,20 @@ impl PoolState {
     }
 
     pub async fn on_event(&self, event: &PoolEvent) {
+        // NetworkStats: record ONLY into network hashrate timeseries.
+        // Do not store in any recent_* buffer, and do not touch totals.
         if is_network_stats(event) {
+            if let Some(hs) = extract_network_hashrate_hs(event) {
+                let t = extract_event_ts_seconds(event).unwrap_or_else(now_ts);
+                let mut g = self.inner.lock().await;
+
+                g.network_hashrate_1m_24h.push_back(TimeSeriesPoint { t, v: hs });
+                while g.network_hashrate_1m_24h.len() > DEFAULT_HASHRATE_POINTS_24H_1M {
+                    g.network_hashrate_1m_24h.pop_front();
+                }
+
+                g.dirty = true;
+            }
             return;
         }
 
@@ -449,7 +492,10 @@ impl PoolState {
 
                 // FIX: avoid E0502 by cloning recent_blocks first
                 let recent_blocks = g.recent_blocks.clone();
-                rebuild_block_timeseries_hourly_1d_from_recent_blocks(&mut g.snapshot, &recent_blocks);
+                rebuild_block_timeseries_hourly_1d_from_recent_blocks(
+                    &mut g.snapshot,
+                    &recent_blocks,
+                );
             }
             PoolEvent::PayoutComplete {
                 height,
@@ -501,17 +547,17 @@ impl PoolState {
     // ── Timeseries API ──────────────────────────────────────────────────────
     //
     // Call this from your stats loop (e.g. every 60s) with your computed pool
-    // hashrate in H/s. This persists to pool_state.json and rehydrates on boot.
+    // hashrate in H/s. This persists to pool_state.json and loads on boot.
     pub async fn record_hashrate_sample(&self, hashrate_hs: f64) {
         let mut g = self.inner.lock().await;
 
-        g.hashrate_1m_24h.push_back(TimeSeriesPoint {
+        g.pool_hashrate_1m_24h.push_back(TimeSeriesPoint {
             t: now_ts(),
             v: hashrate_hs,
         });
 
-        while g.hashrate_1m_24h.len() > DEFAULT_HASHRATE_POINTS_24H_1M {
-            g.hashrate_1m_24h.pop_front();
+        while g.pool_hashrate_1m_24h.len() > DEFAULT_HASHRATE_POINTS_24H_1M {
+            g.pool_hashrate_1m_24h.pop_front();
         }
 
         g.dirty = true;
@@ -535,14 +581,20 @@ impl PoolState {
                 g.snapshot.recent_payouts = g.recent_payouts.iter().cloned().collect();
 
                 // Timeseries into snapshot
-                g.snapshot.timeseries.hashrate_1m_24h = g.hashrate_1m_24h.iter().cloned().collect();
+                g.snapshot.timeseries.pool_hashrate_1m_24h =
+                    g.pool_hashrate_1m_24h.iter().cloned().collect();
+                g.snapshot.timeseries.network_hashrate_1m_24h =
+                    g.network_hashrate_1m_24h.iter().cloned().collect();
 
                 // Derived blocks series
                 rebuild_block_timeseries_daily_from_daily(&mut g.snapshot);
 
                 // FIX: avoid E0502 by cloning recent_blocks first
                 let recent_blocks = g.recent_blocks.clone();
-                rebuild_block_timeseries_hourly_1d_from_recent_blocks(&mut g.snapshot, &recent_blocks);
+                rebuild_block_timeseries_hourly_1d_from_recent_blocks(
+                    &mut g.snapshot,
+                    &recent_blocks,
+                );
 
                 let path = g.state_file.clone();
                 let json = match serde_json::to_vec_pretty(&g.snapshot) {
@@ -576,6 +628,44 @@ impl PoolState {
 #[inline]
 fn is_network_stats(e: &PoolEvent) -> bool {
     matches!(e, PoolEvent::NetworkStats { .. })
+}
+
+fn extract_event_ts_seconds(e: &PoolEvent) -> Option<u64> {
+    let v = serde_json::to_value(e).ok()?;
+    // try common keys
+    if let Some(ts) = v.get("timestamp").and_then(|x| x.as_u64()) {
+        return Some(ts);
+    }
+    if let Some(ts) = v.get("ts").and_then(|x| x.as_u64()) {
+        return Some(ts);
+    }
+    None
+}
+
+fn extract_network_hashrate_hs(e: &PoolEvent) -> Option<f64> {
+    let v = serde_json::to_value(e).ok()?;
+    // try common key spellings for hashrate
+    for k in [
+        "network_hashrate_hs",
+        "network_hashrate",
+        "hashrate_hs",
+        "hashrate",
+        "net_hashrate_hs",
+        "net_hashrate",
+    ] {
+        if let Some(x) = v.get(k) {
+            if let Some(f) = x.as_f64() {
+                return Some(f);
+            }
+            if let Some(u) = x.as_u64() {
+                return Some(u as f64);
+            }
+            if let Some(i) = x.as_i64() {
+                return Some(i as f64);
+            }
+        }
+    }
+    None
 }
 
 fn rebuild_last_payout_from_recent_payouts(
@@ -843,6 +933,6 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.1.5-timeseries-blocks1d-hourly-borrowfix.1
-// Updated: 2026-02-14
+// Version: 1.1.6-timeseries-dual-hashrate24h.1
+// Updated: 2026-02-15
 // ============================================================================
