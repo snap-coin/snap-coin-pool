@@ -2511,6 +2511,7 @@ Changes from v1.5.5-compact.15:
                     hr24h.classList.toggle("on", state.hrMode === HR_MODE_24H);
                 }
 
+                // Draw a bar chart on a canvas.
                 function drawBarChart(ctx, canvas, labels, values, opts) {
                     const rect = canvas.getBoundingClientRect();
                     const dpr = window.devicePixelRatio || 1;
@@ -2525,6 +2526,8 @@ Changes from v1.5.5-compact.15:
                     }
                     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
                     ctx.clearRect(0, 0, w, h);
+
+                    // grid
                     ctx.strokeStyle = "rgba(255,255,255,0.06)";
                     ctx.lineWidth = 1;
                     for (let i = 1; i <= 3; i++) {
@@ -2534,52 +2537,65 @@ Changes from v1.5.5-compact.15:
                         ctx.lineTo(w - 10, y);
                         ctx.stroke();
                     }
-                    const maxV = Math.max(
-                        1,
-                        ...values.map((v) => Number(v) || 0),
-                    );
+
+                    const maxV = Math.max(1, ...values.map((v) => Number(v) || 0));
                     const padL = 10,
                         padR = 10,
                         padT = 10,
                         padB = 22,
                         innerW = w - padL - padR,
                         innerH = h - padT - padB;
+
                     const n = labels.length;
                     const barGap = n <= 24 ? 4 : 3;
                     const barW = Math.max(
                         2,
                         Math.floor((innerW - (n - 1) * barGap) / n),
                     );
+
+                    const tickFont =
+                        "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
+
                     for (let i = 0; i < n; i++) {
                         const v = Number(values[i] || 0);
                         const bh = Math.floor((v / maxV) * innerH);
                         const x = padL + i * (barW + barGap);
                         const y = padT + (innerH - bh);
+
+                        // bar
                         ctx.fillStyle = "rgba(111,231,255,0.35)";
                         ctx.fillRect(x, y, barW, bh);
+
+                        // value INSIDE bar (only if it fits)
+                        if (v > 0 && bh >= 14 && barW >= 12) {
+                            const txt = String(v);
+                            ctx.font = tickFont;
+                            ctx.fillStyle = "rgba(255,255,255,0.70)";
+                            const tw = ctx.measureText(txt).width;
+                            const tx = x + Math.floor((barW - tw) / 2);
+                            const ty = y + 11; // inside near top
+                            ctx.fillText(txt, tx, ty);
+                        }
+
+                        // ticks
                         const showTick =
                             opts && typeof opts.tickEvery === "number"
-                                ? i === 0 ||
-                                  i === n - 1 ||
-                                  i % opts.tickEvery === 0
+                                ? i === 0 || i === n - 1 || i % opts.tickEvery === 0
                                 : i === 0 || i === n - 1;
+
                         if (showTick) {
                             ctx.fillStyle = "rgba(255,255,255,0.45)";
-                            ctx.font =
-                                "10px " +
-                                CSS.supports("font-family", "ui-monospace")
-                                    ? "ui-monospace"
-                                    : "monospace";
-                            ctx.font =
-                                "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
+                            ctx.font = tickFont;
                             ctx.fillText(labels[i], x, h - 6);
                         }
                     }
+
+                    // max label
                     ctx.fillStyle = "rgba(255,255,255,0.55)";
-                    ctx.font =
-                        "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
+                    ctx.font = tickFont;
                     ctx.fillText(`max=${maxV}`, w - 62, 12);
                 }
+
 
                 function drawBlocksChart() {
                     if (state.blocksMode === BLOCKS_MODE_1D) {
