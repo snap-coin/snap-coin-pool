@@ -49,7 +49,7 @@ use anyhow::anyhow;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{mpsc, RwLock},
+    sync::{RwLock, mpsc},
     task::JoinHandle,
     time::timeout,
 };
@@ -68,11 +68,11 @@ use snap_coin::{
     full_node::node_state::ChainEvent,
 };
 
-// ✅ REQUIRED: bring trait methods (get_height/get_reward/...) into scope
+// REQUIRED: bring trait methods (get_height/get_reward/...) into scope
 use snap_coin::blockchain_data_provider::BlockchainDataProvider;
 
 use crate::{
-    handle_rewards::{handle_rewards_with_metrics, PayoutMetrics},
+    handle_rewards::{PayoutMetrics, handle_rewards_with_metrics},
     handle_share::handle_share,
     job_handler::JobHandler,
     share_store::SharedShareStore,
@@ -97,7 +97,7 @@ const KICK_WINDOW_SECS: u64 = 300; // 5 minutes
 const KICKS_TO_BAN: u32 = 3;
 
 // Active connection policy (requested)
-const MAX_CONNS_PER_MINER: usize = 10;
+const MAX_CONNS_PER_MINER: usize = 100;
 
 // Passive heartbeat (idle timeout) on the request stream
 const HEARTBEAT_IDLE_SECS: u64 = 3600;
@@ -321,12 +321,14 @@ impl PoolServer {
         let miner_key = format!("{:?}", client_address);
         let mut reject_streak: u32 = 0;
 
-        self.emit(PoolEvent::MinerConnected {
-            miner: miner_key.clone(),
-            ip: ip.clone(),
-            timestamp: now_ts(),
-        })
-        .await;
+        if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
+            self.emit(PoolEvent::MinerConnected {
+                miner: miner_key.clone(),
+                ip: ip.clone(),
+                timestamp: now_ts(),
+            })
+            .await;
+        }
 
         loop {
             // Passive heartbeat: if no request arrives within HEARTBEAT_IDLE_SECS, drop connection.
@@ -344,7 +346,10 @@ impl PoolServer {
                     break;
                 }
                 Ok(Err(e)) => {
-                    println!("Miner request decode error from {} miner={}: {}", ip, miner_key, e);
+                    println!(
+                        "Miner request decode error from {} miner={}: {}",
+                        ip, miner_key, e
+                    );
                     self.add_penalty(ip.clone()).await;
                     break;
                 }
@@ -401,13 +406,14 @@ impl PoolServer {
 
                                     if reject_streak >= WATCHDOG_REJECT_STREAK_KICK {
                                         let was_banned = self.record_kick_and_maybe_ban(&ip).await;
-
-                                        self.emit(PoolEvent::MinerDisconnected {
-                                            miner: miner_key.clone(),
-                                            ip: ip.clone(),
-                                            timestamp: now_ts(),
-                                        })
-                                        .await;
+                                        if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
+                                            self.emit(PoolEvent::MinerDisconnected {
+                                                miner: miner_key.clone(),
+                                                ip: ip.clone(),
+                                                timestamp: now_ts(),
+                                            })
+                                            .await;
+                                        }
 
                                         let _ = stream.shutdown().await;
 
@@ -477,25 +483,28 @@ impl PoolServer {
                 println!("Miner error from {} miner={}: {}", ip, miner_key, e);
                 self.add_penalty(ip.clone()).await;
 
-                self.emit(PoolEvent::MinerDisconnected {
-                    miner: miner_key.clone(),
-                    ip: ip.clone(),
-                    timestamp: now_ts(),
-                })
-                .await;
+                if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
+                    self.emit(PoolEvent::MinerDisconnected {
+                        miner: miner_key.clone(),
+                        ip: ip.clone(),
+                        timestamp: now_ts(),
+                    })
+                    .await;
+                }
 
                 break;
             }
         }
 
         self.unregister_connection(&miner_key, &ip).await;
-
-        self.emit(PoolEvent::MinerDisconnected {
-            miner: miner_key,
-            ip,
-            timestamp: now_ts(),
-        })
-        .await;
+        if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
+            self.emit(PoolEvent::MinerDisconnected {
+                miner: miner_key,
+                ip,
+                timestamp: now_ts(),
+            })
+            .await;
+        }
     }
 
     // ── Listen (logic preserved; telemetry added) ──────────────────────────
