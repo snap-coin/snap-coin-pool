@@ -2517,6 +2517,7 @@ Changes from v1.5.5-compact.15:
                     const dpr = window.devicePixelRatio || 1;
                     const w = Math.max(420, Math.floor(rect.width));
                     const h = Math.max(110, Math.floor(rect.height));
+
                     if (
                         canvas.width !== Math.floor(w * dpr) ||
                         canvas.height !== Math.floor(h * dpr)
@@ -2524,6 +2525,7 @@ Changes from v1.5.5-compact.15:
                         canvas.width = Math.floor(w * dpr);
                         canvas.height = Math.floor(h * dpr);
                     }
+
                     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
                     ctx.clearRect(0, 0, w, h);
 
@@ -2548,10 +2550,7 @@ Changes from v1.5.5-compact.15:
 
                     const n = labels.length;
                     const barGap = n <= 24 ? 4 : 3;
-                    const barW = Math.max(
-                        2,
-                        Math.floor((innerW - (n - 1) * barGap) / n),
-                    );
+                    const barW = Math.max(2, Math.floor((innerW - (n - 1) * barGap) / n));
 
                     const tickFont =
                         "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
@@ -2566,15 +2565,27 @@ Changes from v1.5.5-compact.15:
                         ctx.fillStyle = "rgba(111,231,255,0.35)";
                         ctx.fillRect(x, y, barW, bh);
 
-                        // value INSIDE bar (only if it fits)
-                        if (v > 0 && bh >= 14 && barW >= 12) {
+                        // value label: inside if tall enough, else above
+                        if (v > 0) {
                             const txt = String(v);
                             ctx.font = tickFont;
-                            ctx.fillStyle = "rgba(255,255,255,0.70)";
+
                             const tw = ctx.measureText(txt).width;
-                            const tx = x + Math.floor((barW - tw) / 2);
-                            const ty = y + 11; // inside near top
-                            ctx.fillText(txt, tx, ty);
+                            let tx = x + Math.floor((barW - tw) / 2);
+
+                            // clamp so it stays on-canvas
+                            tx = Math.max(2, Math.min(tx, w - 2 - tw));
+
+                            if (bh >= 16 && barW >= 12) {
+                                // inside near top
+                                ctx.fillStyle = "rgba(255,255,255,0.70)";
+                                ctx.fillText(txt, tx, y + 12);
+                            } else {
+                                // above bar
+                                ctx.fillStyle = "rgba(255,255,255,0.60)";
+                                const ty = Math.max(10, y - 4);
+                                ctx.fillText(txt, tx, ty);
+                            }
                         }
 
                         // ticks
@@ -2594,6 +2605,7 @@ Changes from v1.5.5-compact.15:
                     ctx.fillStyle = "rgba(255,255,255,0.55)";
                     ctx.font = tickFont;
                     ctx.fillText(`max=${maxV}`, w - 62, 12);
+                  
                 }
 
 
