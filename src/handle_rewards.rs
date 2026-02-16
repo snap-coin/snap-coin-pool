@@ -269,11 +269,17 @@ pub async fn handle_rewards_with_metrics(
     .await
     .map_err(|_| BlockchainError::Io("Could not compute pow for reward split tx".to_string()))??;
 
+
     // Capture best-effort txid (observational)
     let txid: String = tx
         .transaction_id
         .map(|id| format!("{:?}", id))
         .unwrap_or_else(|| "-".to_string());
+
+    println!(
+        "[POOL] Submitting reward transaction: {}",
+        tx.transaction_id.unwrap().dump_base36()
+    );
 
     client.submit_transaction(tx).await??;
 

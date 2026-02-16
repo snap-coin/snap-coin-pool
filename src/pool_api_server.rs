@@ -528,6 +528,7 @@ impl PoolServer {
                 if let Some((block, _public)) = submit {
                     if let Err(e) = async move {
                         submit_client.submit_block(block.clone()).await??;
+
                         println!("[POOL] Pool mined new block!");
 
                         let node_height = submit_client.get_height().await.unwrap_or(0) as u64;
@@ -553,6 +554,23 @@ impl PoolServer {
                             self_clone.pool_fee,
                         )
                         .await?;
+
+                        println!(
+                            "[POOL] Mined new valid block! {}",
+                            block.meta.hash.unwrap().dump_base36()
+                        );
+                        println!(
+                            "[POOL] Pool reward transaction status: {:?}",
+                            handle_rewards(
+                                &*submit_client,
+                                block,
+                                self_clone.pool_private,
+                                self_clone.pool_dev,
+                                &self_clone.share_store,
+                                self_clone.pool_fee,
+                            )
+                            .await
+                        );
 
                         if let Some(m) = payout_metrics {
                             let payouts: Vec<MinerPayout> = m
