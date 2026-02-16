@@ -1,7 +1,7 @@
 // ============================================================================
 // File: pool_api_server.rs
 // Location: snap-coin-pool-v2/src/pool_api_server.rs
-// Version: 0.1.4-stats.17
+// Version: 0.1.4-stats.18
 //
 // Description:
 // Upstream pool API server (logic preserved) with OPTIONAL instrumentation hooks
@@ -38,6 +38,11 @@
 // FIX (v0.1.4-stats.17):
 // - Do NOT create a node API client per incoming miner connection.
 //   Create a single shared Client once at server start and reuse via Arc.
+//
+// FIX (v0.1.4-stats.18):
+// - Resolve moved `block` compile error by capturing derived strings (hash) before move.
+// - Remove accidental second payout path call that would re-use moved `block` and
+//   could change payout behavior.
 // ============================================================================
 
 use anyhow::anyhow;
@@ -519,7 +524,9 @@ impl PoolServer {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
+            // Single submit client for the submit/payout task (already shared in this task).
             let submit_client = Arc::new(Client::connect(self_clone.pool_api).await.unwrap());
+
             loop {
                 let submit: Option<(Block, Public)> = submit_rx.recv().await;
                 let self_clone = self_clone.clone();
@@ -527,15 +534,14 @@ impl PoolServer {
 
                 if let Some((block, _public)) = submit {
                     if let Err(e) = async move {
+                        // NOTE: submit_block uses a clone, so we still own `block` here.
                         submit_client.submit_block(block.clone()).await??;
-
                         println!("[POOL] Pool mined new block!");
 
                         let node_height = submit_client.get_height().await.unwrap_or(0) as u64;
                         let reward = submit_client.get_reward().await.unwrap_or(0);
 
-                        // FIX v0.1.4-stats.16:
-                        // Emit node_height directly (no -1).
+                        // FIX v0.1.4-stats.16: Emit node_height directly (no -1).
                         self_clone
                             .emit(PoolEvent::BlockFound {
                                 height: node_height,
@@ -544,6 +550,9 @@ impl PoolServer {
                                 timestamp: now_ts(),
                             })
                             .await;
+
+                        // v0.1.4-stats.18: capture derived info BEFORE moving `block`.
+                        let block_hash_b36 = block.meta.hash.unwrap().dump_base36();
 
                         let payout_metrics: Option<PayoutMetrics> = handle_rewards_with_metrics(
                             &*submit_client,
@@ -555,22 +564,7 @@ impl PoolServer {
                         )
                         .await?;
 
-                        println!(
-                            "[POOL] Mined new valid block! {}",
-                            block.meta.hash.unwrap().dump_base36()
-                        );
-                        println!(
-                            "[POOL] Pool reward transaction status: {:?}",
-                            handle_rewards(
-                                &*submit_client,
-                                block,
-                                self_clone.pool_private,
-                                self_clone.pool_dev,
-                                &self_clone.share_store,
-                                self_clone.pool_fee,
-                            )
-                            .await
-                        );
+                        println!("[POOL] Mined new valid block! {}", block_hash_b36);
 
                         if let Some(m) = payout_metrics {
                             let payouts: Vec<MinerPayout> = m
@@ -582,8 +576,7 @@ impl PoolServer {
                                 })
                                 .collect();
 
-                            // FIX v0.1.4-stats.16:
-                            // Emit node_height directly (no -1).
+                            // FIX v0.1.4-stats.16: Emit node_height directly (no -1).
                             self_clone
                                 .emit(PoolEvent::PayoutComplete {
                                     height: node_height,
@@ -601,7 +594,7 @@ impl PoolServer {
                     }
                     .await
                     {
-                        println!("Failed to submit pool block: {e}")
+                        println!("Failed to submit pool block: {e}");
                     }
                 }
             }
@@ -623,7 +616,7 @@ impl PoolServer {
                 }
                 .await
                 {
-                    println!("Job updater failed! {e}")
+                    println!("Job updater failed! {e}");
                 }
             }
         });
@@ -709,7 +702,7 @@ impl PoolServer {
                 }
                 .await
                 {
-                    println!("API client failed to connect: {e}")
+                    println!("API client failed to connect: {e}");
                 }
             }
 
@@ -735,7 +728,7 @@ fn now_ts() -> u64 {
 // ============================================================================
 // File: pool_api_server.rs
 // Location: snap-coin-pool-v2/src/pool_api_server.rs
-// Version: 0.1.4-stats.17
+// Version: 0.1.4-stats.18
 // Updated: 2026-02-16
 // ============================================================================
 // Generated: 2026-02-16T00:00:00Z
