@@ -680,6 +680,13 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
       color: rgba(255,255,255,0.35);
       font-weight: 400;
     }
+    .feed-rows-bar{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
 
     @media (max-width: 1100px){
       body{ overflow:auto; height:auto; }
@@ -964,12 +971,14 @@ count = -1  # -1 for max threads</div>
             <div class="head-title-group">
               <h2>Live Event Feed</h2>
               <span class="head-subtitle">last 200</span>
+              <div class="feed-rows-bar">
+                <span class="hint">Rows:</span>
+                <div id="feed-rows-5" class="chip">5</div>
+                <div id="feed-rows-10" class="chip on">10</div>
+                <div id="feed-rows-20" class="chip">20</div>
+              </div>
             </div>
             <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
-              <span class="hint">Rows:</span>
-              <div id="feed-rows-5" class="chip">5</div>
-              <div id="feed-rows-10" class="chip on">10</div>
-              <div id="feed-rows-20" class="chip">20</div>
               <div id="feed-all" class="chip on">All</div>
               <div id="feed-shares" class="chip">Shares</div>
               <div id="feed-blocks" class="chip">Blocks</div>
