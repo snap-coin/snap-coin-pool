@@ -134,6 +134,38 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
       background: #dce8f5;
       color: #27435d;
     }
+    body[data-theme="light"] .evt .t{
+      color: #617488;
+    }
+    body[data-theme="light"] .footer-meta{
+      color: #607287;
+    }
+    body[data-theme="light"] .footer-link{
+      color: #445b72;
+    }
+    body[data-theme="light"] .footer-link:hover{
+      color: #2f4f6b;
+      background: #e6edf6;
+    }
+    body[data-theme="light"] .copy-btn{
+      border-color: #cdd8e5;
+      background: #edf3fa;
+      color: #5f7186;
+    }
+    body[data-theme="light"] .connect-miner-hint{
+      color: #617488;
+    }
+    body[data-theme="light"] .connect-miner-hint .connect-addr{
+      color: #2e4a65;
+    }
+    body[data-theme="light"] .htm-inline-link{
+      color: #506680;
+      border-color: #cdd8e5;
+      background: #edf3fa;
+    }
+    body[data-theme="light"] .kpi-sep{
+      color: #788a9e;
+    }
     body[data-theme="light"] .feed-viewport{
       border-color: #d8e0ea;
       background: #f5f8fc;
@@ -300,6 +332,7 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
     .accent-orange{ color: var(--orange); }
     .accent-magenta{ color: var(--magenta); }
     .accent-purple{ color: var(--purple); }
+    .kpi-sep{ color: rgba(255,255,255,0.35); }
 
     .row1{
       display:grid;
@@ -687,6 +720,55 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
       flex-wrap: wrap;
       margin-top: 4px;
     }
+    .footer-meta{
+      margin-top: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: rgba(255,255,255,0.30);
+    }
+    .footer-link{
+      color: rgba(255,255,255,0.45);
+      text-decoration: none;
+      border-radius: 4px;
+      padding: 0 2px;
+    }
+    .copy-btn{
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.04);
+      color: rgba(255,255,255,0.45);
+      font-size: 10px;
+      line-height: 1;
+      transition: background 0.15s;
+    }
+    .connect-miner-hint{
+      font-family: var(--mono);
+      font-size: 11px;
+      color: rgba(255,255,255,0.40);
+      white-space: nowrap;
+    }
+    .connect-miner-hint .connect-addr{
+      color: rgba(255,255,255,0.65);
+      font-weight: 700;
+    }
+    .htm-inline-link{
+      font-size: 10px;
+      font-weight: 400;
+      color: rgba(255,255,255,0.45);
+      text-decoration: none;
+      padding: 3px 8px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.04);
+      transition: background 0.15s;
+    }
 
     @media (max-width: 1100px){
       body{ overflow:auto; height:auto; }
@@ -748,7 +830,7 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
               <div class="label">SHARES (ACC / REJ)</div>
               <div class="value">
                 <span id="kpi-acc" class="accent-green">0</span>
-                <span style="color:rgba(255,255,255,0.35)">/</span>
+                <span class="kpi-sep">/</span>
                 <span id="kpi-rej" class="accent-red">0</span>
               </div>
             </div>
@@ -879,12 +961,12 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
                   </div>
                 </div>
                 <canvas id="hashrate-chart" width="1200" height="420"></canvas>
-                <div style="margin-top:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-family:var(--mono);font-size:10px;color:rgba(255,255,255,0.30);">
-                  <span>built by <a href="https://github.com/OIEIEIO/snap-coin-pool/tree/new-protocol-dash" target="_blank" rel="noopener" style="color:rgba(255,255,255,0.45);text-decoration:none;">OIEIEIO</a> · <a href="https://github.com/OIEIEIO/snap-coin-pool/tree/new-protocol-dash" target="_blank" rel="noopener" style="color:rgba(255,255,255,0.45);text-decoration:none;">github</a></span>
+                <div class="footer-meta">
+                  <span>built by <a class="footer-link" href="https://github.com/OIEIEIO/snap-coin-pool/tree/new-protocol-dash" target="_blank" rel="noopener">OIEIEIO</a> · <a class="footer-link" href="https://github.com/OIEIEIO/snap-coin-pool/tree/new-protocol-dash" target="_blank" rel="noopener">github</a></span>
                   <span style="display:flex;align-items:center;gap:6px;">
                     <span>donate SNAP:</span>
                     <span id="donate-addy" style="color:var(--orange);font-weight:700;letter-spacing:0.3px;user-select:all;">y7ipei5rw48329n8k0h69jk12zgfyrbva7r5nxucasnollsyo</span>
-                    <span id="copy-addy-btn" title="Copy address" style="cursor:pointer;padding:2px 6px;border-radius:6px;border:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.45);font-size:10px;line-height:1;transition:background 0.15s;">copy</span>
+                    <span id="copy-addy-btn" class="copy-btn" title="Copy address">copy</span>
                   </span>
                 </div>
               </div>
@@ -901,14 +983,14 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
         <div id="howtomine-card" class="card collapsed">
           <div class="head">
             <h2>How to Mine?</h2>
-            <span style="font-family:var(--mono);font-size:11px;color:rgba(255,255,255,0.40);white-space:nowrap;">connect miner at <span id="pool-connect-addr" style="color:rgba(255,255,255,0.65);font-weight:700;">…</span></span>
+            <span class="connect-miner-hint">connect miner at <span id="pool-connect-addr" class="connect-addr">…</span></span>
             <div style="display:flex; align-items:center; gap:10px;">
               <div id="htm-collapse-btn" class="collapse-btn" title="Collapse/expand How to Mine">Expand</div>
             </div>
           </div>
           <div class="body">
             <div class="htm-step">
-              <div class="htm-step-title" style="display:flex;align-items:center;gap:10px;">1. Install the miner <a href="https://github.com/snap-coin/snap-coin-miner" target="_blank" rel="noopener" style="font-size:10px;font-weight:400;color:rgba(255,255,255,0.45);text-decoration:none;padding:3px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.04);transition:background 0.15s;">github</a></div>
+              <div class="htm-step-title" style="display:flex;align-items:center;gap:10px;">1. Install the miner <a class="htm-inline-link" href="https://github.com/snap-coin/snap-coin-miner" target="_blank" rel="noopener">github</a></div>
               <div class="htm-code">cargo install snap-coin-miner</div>
             </div>
             <div class="htm-step">
@@ -2136,7 +2218,7 @@ count = -1  # -1 for max threads</div>
     const addy=document.getElementById("donate-addy").textContent;
     navigator.clipboard.writeText(addy).then(()=>{
       this.textContent="copied!"; this.style.color="var(--green)";
-      setTimeout(()=>{ this.textContent="copy"; this.style.color="rgba(255,255,255,0.55)"; },1500);
+      setTimeout(()=>{ this.textContent="copy"; this.style.color="var(--muted)"; },1500);
     }).catch(()=>{
       const r=document.createRange(); r.selectNodeContents(document.getElementById("donate-addy"));
       const s=window.getSelection(); s.removeAllRanges(); s.addRange(r);
