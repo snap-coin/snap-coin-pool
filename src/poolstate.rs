@@ -1,7 +1,7 @@
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.1.6-timeseries-dual-hashrate24h.1
+// Version: 1.2.1-miner-shares-persist.1
 //
 // Description: Server-side shared pool state (snapshot loading) + lightweight
 //              disk persistence (no DB).
@@ -26,13 +26,26 @@
 //   - Daily buckets bounded (default 30 days).
 //   - Uses internal UTC day formatter (civil_from_days) to avoid chrono.
 //   - Persistent timeseries stored inside pool_state.json.
+//   - Per-miner payout totals rebuilt from payout_ledger_*.jsonl on boot.
 //
-// CHANGELOG (v1.1.6-timeseries-dual-hashrate24h.1):
-//   - ADD: Persist TWO distinct 24h hashrate series into pool_state.json:
-//       * timeseries.pool_hashrate_1m_24h    (pool hashrate samples)
-//       * timeseries.network_hashrate_1m_24h (network hashrate samples)
+// CHANGELOG (v1.2.1-miner-shares-persist.1):
+//   - ADD: miner_shares_acc (HashMap<String, u64>) to PoolSnapshot.
+//   - ADD: miner_shares_rej (HashMap<String, u64>) to PoolSnapshot.
+//   - ADD: on_event(ShareAccepted/ShareRejected) accumulates per-miner counts.
+//   - ADD: Per-miner share counts persisted in pool_state.json across restarts.
+//
+// PRIOR CHANGELOG (v1.2.0-miner-paid-totals.1):
+//   - ADD: MinerLastPayout struct for per-miner last payout info.
+//   - ADD: miner_paid_totals (HashMap<String, u64>) to PoolSnapshot.
+//   - ADD: miner_last_payout (HashMap<String, MinerLastPayout>) to PoolSnapshot.
+//   - ADD: On boot, scan payout_ledger_*.jsonl to rebuild per-miner maps.
+//   - ADD: on_event(PayoutComplete) updates in-memory per-miner maps.
+//   - ADD: snapshot() includes per-miner maps in response.
+//
+// PRIOR CHANGELOG (v1.1.6-timeseries-dual-hashrate24h.1):
+//   - ADD: Persist TWO distinct 24h hashrate series into pool_state.json.
 //   - KEEP: NetworkStats stays out of recent event buffers.
-//   - REMOVE: any hashrate “cap/spike filter” behavior (not requested).
+//   - REMOVE: any hashrate "cap/spike filter" behavior (not requested).
 // ============================================================================
 
 use std::{
@@ -126,6 +139,17 @@ pub struct LastPayout {
     pub timestamp: u64,
 }
 
+// ── Per-miner payout tracking ───────────────────────────────────────────────
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct MinerLastPayout {
+    pub amount: u64,
+    #[serde(default)]
+    pub height: u64,
+    #[serde(default)]
+    pub ts: u64,
+}
+
 // ── Persistent time series ──────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -187,6 +211,20 @@ pub struct PoolSnapshot {
     // Persistent timeseries
     #[serde(default)]
     pub timeseries: TimeSeries,
+
+    // Per-miner payout tracking (rebuilt from ledger on boot)
+    #[serde(default)]
+    pub miner_paid_totals: HashMap<String, u64>,
+
+    #[serde(default)]
+    pub miner_last_payout: HashMap<String, MinerLastPayout>,
+
+    // Per-miner share counts (persisted in pool_state.json)
+    #[serde(default)]
+    pub miner_shares_acc: HashMap<String, u64>,
+
+    #[serde(default)]
+    pub miner_shares_rej: HashMap<String, u64>,
 }
 
 // Legacy schema loader (pre split): recent_events
@@ -223,6 +261,14 @@ struct Inner {
     // Timeseries in-memory deques
     pool_hashrate_1m_24h: VecDeque<TimeSeriesPoint>,
     network_hashrate_1m_24h: VecDeque<TimeSeriesPoint>,
+
+    // Per-miner payout accumulators (in-memory, rebuilt from ledger on boot)
+    miner_paid_totals: HashMap<String, u64>,
+    miner_last_payout: HashMap<String, MinerLastPayout>,
+
+    // Per-miner share counts (in-memory, persisted via pool_state.json)
+    miner_shares_acc: HashMap<String, u64>,
+    miner_shares_rej: HashMap<String, u64>,
 
     dirty: bool,
     state_file: PathBuf,
@@ -379,6 +425,24 @@ impl PoolState {
         rebuild_block_timeseries_daily_from_daily(&mut snapshot);
         rebuild_block_timeseries_hourly_1d_from_recent_blocks(&mut snapshot, &recent_blocks);
 
+        // ── Per-miner payout totals: rebuild from ledger files ───────────────
+        let (miner_paid_totals, miner_last_payout) =
+            rebuild_miner_totals_from_ledger(Path::new(&ledger_dir)).await;
+
+        println!(
+            "[poolstate] Rebuilt per-miner payout totals from ledger: {} miners tracked",
+            miner_paid_totals.len()
+        );
+
+        // ── Per-miner share counts: load from persisted snapshot ─────────────
+        let snapshot_shares_acc = snapshot.miner_shares_acc.clone();
+        let snapshot_shares_rej = snapshot.miner_shares_rej.clone();
+
+        println!(
+            "[poolstate] Loaded per-miner share counts from state: {} miners with shares",
+            snapshot_shares_acc.len()
+        );
+
         let inner = Inner {
             snapshot,
             recent_shares,
@@ -386,6 +450,10 @@ impl PoolState {
             recent_payouts,
             pool_hashrate_1m_24h,
             network_hashrate_1m_24h,
+            miner_paid_totals,
+            miner_last_payout,
+            miner_shares_acc: snapshot_shares_acc,
+            miner_shares_rej: snapshot_shares_rej,
             dirty: false,
             state_file: state_path,
             ledger_enable,
@@ -412,6 +480,14 @@ impl PoolState {
         g.snapshot.timeseries.pool_hashrate_1m_24h = g.pool_hashrate_1m_24h.iter().cloned().collect();
         g.snapshot.timeseries.network_hashrate_1m_24h =
             g.network_hashrate_1m_24h.iter().cloned().collect();
+
+        // Per-miner payout data into snapshot
+        g.snapshot.miner_paid_totals = g.miner_paid_totals.clone();
+        g.snapshot.miner_last_payout = g.miner_last_payout.clone();
+
+        // Per-miner share counts into snapshot
+        g.snapshot.miner_shares_acc = g.miner_shares_acc.clone();
+        g.snapshot.miner_shares_rej = g.miner_shares_rej.clone();
 
         // Blocks series (ensure up-to-date even if client polls infrequently)
         rebuild_block_timeseries_daily_from_daily(&mut g.snapshot);
@@ -467,11 +543,19 @@ impl PoolState {
 
         // Aggregates
         match event {
-            PoolEvent::ShareAccepted { .. } => {
+            PoolEvent::ShareAccepted { miner, .. } => {
                 g.snapshot.totals.shares_acc = g.snapshot.totals.shares_acc.saturating_add(1);
+
+                // Per-miner accumulation
+                let entry = g.miner_shares_acc.entry(miner.clone()).or_insert(0);
+                *entry = entry.saturating_add(1);
             }
-            PoolEvent::ShareRejected { .. } => {
+            PoolEvent::ShareRejected { miner, .. } => {
                 g.snapshot.totals.shares_rej = g.snapshot.totals.shares_rej.saturating_add(1);
+
+                // Per-miner accumulation
+                let entry = g.miner_shares_rej.entry(miner.clone()).or_insert(0);
+                *entry = entry.saturating_add(1);
             }
             PoolEvent::BlockFound {
                 height,
@@ -534,6 +618,25 @@ impl PoolState {
                     timestamp: *timestamp,
                 };
 
+                // ── Per-miner payout accumulation ────────────────────────────
+                for p in payouts.iter() {
+                    let miner_key = format!("{}", p.miner);
+
+                    // Accumulate total
+                    let entry = g.miner_paid_totals.entry(miner_key.clone()).or_insert(0);
+                    *entry = entry.saturating_add(p.amount);
+
+                    // Track last payout
+                    g.miner_last_payout.insert(
+                        miner_key,
+                        MinerLastPayout {
+                            amount: p.amount,
+                            height: *height,
+                            ts: *timestamp,
+                        },
+                    );
+                }
+
                 if g.ledger_enable {
                     let _ = append_ledger_line(&g.ledger_dir, *timestamp, event);
                 }
@@ -586,6 +689,14 @@ impl PoolState {
                 g.snapshot.timeseries.network_hashrate_1m_24h =
                     g.network_hashrate_1m_24h.iter().cloned().collect();
 
+                // Per-miner payout data into snapshot
+                g.snapshot.miner_paid_totals = g.miner_paid_totals.clone();
+                g.snapshot.miner_last_payout = g.miner_last_payout.clone();
+
+                // Per-miner share counts into snapshot
+                g.snapshot.miner_shares_acc = g.miner_shares_acc.clone();
+                g.snapshot.miner_shares_rej = g.miner_shares_rej.clone();
+
                 // Derived blocks series
                 rebuild_block_timeseries_daily_from_daily(&mut g.snapshot);
 
@@ -621,6 +732,91 @@ impl PoolState {
             }
         });
     }
+}
+
+// ── Rebuild per-miner totals from payout ledger files ───────────────────────
+
+/// Scans all payout_ledger_*.jsonl files in ledger_dir, parses each line as a
+/// PayoutComplete event, and accumulates per-miner paid totals + last payout.
+async fn rebuild_miner_totals_from_ledger(
+    ledger_dir: &Path,
+) -> (HashMap<String, u64>, HashMap<String, MinerLastPayout>) {
+    let mut paid_totals: HashMap<String, u64> = HashMap::new();
+    let mut last_payouts: HashMap<String, MinerLastPayout> = HashMap::new();
+
+    // Collect ledger files
+    let mut ledger_files: Vec<PathBuf> = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(ledger_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("payout_ledger_") && name.ends_with(".jsonl") {
+                    ledger_files.push(path);
+                }
+            }
+        }
+    }
+
+    // Sort by filename so we process chronologically
+    ledger_files.sort();
+
+    let mut lines_ok: u64 = 0;
+    let mut lines_err: u64 = 0;
+
+    for path in &ledger_files {
+        if let Ok(contents) = tokio::fs::read_to_string(path).await {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+
+                match serde_json::from_str::<PoolEvent>(line) {
+                    Ok(PoolEvent::PayoutComplete {
+                        height,
+                        payouts,
+                        timestamp,
+                        ..
+                    }) => {
+                        for p in payouts.iter() {
+                            let miner_key = format!("{}", p.miner);
+
+                            let entry = paid_totals.entry(miner_key.clone()).or_insert(0);
+                            *entry = entry.saturating_add(p.amount);
+
+                            last_payouts.insert(
+                                miner_key,
+                                MinerLastPayout {
+                                    amount: p.amount,
+                                    height,
+                                    ts: timestamp,
+                                },
+                            );
+                        }
+                        lines_ok += 1;
+                    }
+                    Ok(_) => {
+                        // Non-payout event in ledger (shouldn't happen, ignore)
+                        lines_ok += 1;
+                    }
+                    Err(_) => {
+                        lines_err += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if lines_ok > 0 || lines_err > 0 {
+        println!(
+            "[poolstate] Ledger scan: {} files, {} lines ok, {} lines err",
+            ledger_files.len(),
+            lines_ok,
+            lines_err
+        );
+    }
+
+    (paid_totals, last_payouts)
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -933,6 +1129,6 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.1.6-timeseries-dual-hashrate24h.1
-// Updated: 2026-02-15
+// Version: 1.2.1-miner-shares-persist.1
+// Created: 2026-02-17T01:00:00Z
 // ============================================================================
