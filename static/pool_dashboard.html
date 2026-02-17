@@ -46,16 +46,117 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
       background: var(--bg);
       color: var(--text);
       font-family: var(--sans);
-      height: 100vh;
-      overflow: hidden;
+      min-height: 100vh;
+      overflow-x: hidden;
+      overflow-y: auto;
+    }
+    body[data-theme="light"]{
+      --bg: #e6ebf2;
+      --panel: #f6f8fc;
+      --panel2: #f9fbff;
+      --border: #d4dde8;
+      --text: #243244;
+      --muted: #617286;
+      --green: #3e8e67;
+      --cyan: #2c84b7;
+      --yellow: #ba8a2f;
+      --red: #b64a64;
+      --orange: #b16f2e;
+      --purple: #7052a8;
+      --magenta: #a64a85;
+      --shadow: 0 8px 24px rgba(29, 43, 63, 0.10);
+      background:
+        radial-gradient(1200px 540px at 8% -5%, #f3f6fb 0%, transparent 65%),
+        radial-gradient(1000px 460px at 96% -12%, #eef3fa 0%, transparent 60%),
+        var(--bg);
+    }
+    body[data-theme="light"] .card{
+      background: var(--panel);
+      border-color: var(--border);
+      box-shadow: var(--shadow);
+    }
+    body[data-theme="light"] .kpi,
+    body[data-theme="light"] .panel,
+    body[data-theme="light"] .evt,
+    body[data-theme="light"] .metric{
+      background: var(--panel2);
+      border-color: #d8e0ea;
+      color: var(--text);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.85);
+    }
+    body[data-theme="light"] .head{
+      border-bottom: 1px solid #d8e0ea;
+      background: linear-gradient(180deg, rgba(255,255,255,0.7), rgba(255,255,255,0.25));
+    }
+    body[data-theme="light"] .head h2,
+    body[data-theme="light"] .head h2 span{
+      color: #314254 !important;
+    }
+    body[data-theme="light"] .statuskv .k,
+    body[data-theme="light"] .head-subtitle,
+    body[data-theme="light"] .label,
+    body[data-theme="light"] .left,
+    body[data-theme="light"] .chart-title,
+    body[data-theme="light"] .metric .m-label{
+      color: #66788d;
+    }
+    body[data-theme="light"] .right,
+    body[data-theme="light"] .statuskv .v,
+    body[data-theme="light"] .mini-table td:last-child,
+    body[data-theme="light"] .value{
+      color: #223246;
+    }
+    body[data-theme="light"] .rows .row,
+    body[data-theme="light"] .mini-table td,
+    body[data-theme="light"] .chart-wrap{
+      border-bottom: 1px solid #dde4ed;
+      border-top-color: #dde4ed;
+    }
+    body[data-theme="light"] .mini-table td:first-child{
+      color: #6b7d91;
+    }
+    body[data-theme="light"] .chip,
+    body[data-theme="light"] .collapse-btn,
+    body[data-theme="light"] .theme-toggle,
+    body[data-theme="light"] button{
+      background: #eef3f9;
+      border-color: #ccd8e5;
+      color: #304255;
+    }
+    body[data-theme="light"] .chip:hover,
+    body[data-theme="light"] .collapse-btn:hover,
+    body[data-theme="light"] .theme-toggle:hover,
+    body[data-theme="light"] button:hover{
+      background: #e7edf6;
+    }
+    body[data-theme="light"] .chip.on{
+      border-color: #a8bfd7;
+      background: #dce8f5;
+      color: #27435d;
+    }
+    body[data-theme="light"] .feed-viewport{
+      border-color: #d8e0ea;
+      background: #f5f8fc;
+    }
+    body[data-theme="light"] input[type="text"]{
+      background: #f3f7fc;
+      border-color: #cad6e4;
+      color: #2b3d50;
+    }
+    body[data-theme="light"] input[type="text"]::placeholder{
+      color: #7c8ea3;
+    }
+    body[data-theme="light"] canvas{
+      background: #f4f8fd;
+      border-color: #d2dce8;
     }
 
     .wrap{
       max-width: 1920px;
       margin: 0 auto;
       padding: 14px 18px 16px 18px;
-      height: 100vh;
-      overflow: hidden;
+      min-height: 100vh;
+      overflow: visible;
       display:flex;
       flex-direction:column;
     }
@@ -78,6 +179,18 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
       gap: 10px;
       white-space: nowrap;
     }
+    .theme-toggle{
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(0,0,0,0.18);
+      color: rgba(255,255,255,0.85);
+      font-family: var(--mono);
+      font-size: 11px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .theme-toggle:hover{ background: rgba(255,255,255,0.08); }
 
     .dot{
       width:10px; height:10px;
@@ -428,7 +541,7 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
 
     .feed{
       height: 100%;
-      overflow:auto;
+      overflow: visible;
       padding-right: 6px;
     }
 
@@ -473,17 +586,28 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
     .card.collapsed .head{ border-bottom: none; }
 
     #feed-card{
-      flex: 1 1 auto;
+      flex: 0 0 auto;
       min-height: 0;
     }
     #feed-card .body{
-      height: 100%;
-      min-height: 0;
       display:flex;
       flex-direction:column;
+      gap: 10px;
+      min-height: 0;
+    }
+    .feed-viewport{
+      height: calc(var(--feed-rows, 10) * 58px);
+      min-height: 220px;
+      max-height: 72vh;
+      overflow: auto;
+      resize: vertical;
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 12px;
+      padding: 8px 8px 0 8px;
+      background: rgba(0,0,0,0.14);
     }
     #feed{
-      flex: 1 1 auto;
+      height: 100%;
       min-height: 0;
     }
 
@@ -576,7 +700,7 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
   </style>
 </head>
 
-<body>
+<body data-theme="dark">
   <div class="wrap">
 
     <div class="grid">
@@ -590,6 +714,7 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
           </div>
 
           <div class="statuswrap" title="WebSocket connection status">
+            <button id="theme-toggle" class="theme-toggle" type="button">Theme: Dark</button>
             <div class="statusline">
               <span id="status-dot" class="dot"></span>
               <span id="status-text">Connecting…</span>
@@ -841,6 +966,10 @@ count = -1  # -1 for max threads</div>
               <span class="head-subtitle">last 200</span>
             </div>
             <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
+              <span class="hint">Rows:</span>
+              <div id="feed-rows-5" class="chip">5</div>
+              <div id="feed-rows-10" class="chip on">10</div>
+              <div id="feed-rows-20" class="chip">20</div>
               <div id="feed-all" class="chip on">All</div>
               <div id="feed-shares" class="chip">Shares</div>
               <div id="feed-blocks" class="chip">Blocks</div>
@@ -850,7 +979,9 @@ count = -1  # -1 for max threads</div>
             </div>
           </div>
           <div class="body">
-            <div id="feed" class="feed"></div>
+            <div id="feed-viewport" class="feed-viewport">
+              <div id="feed" class="feed"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -951,6 +1082,8 @@ count = -1  # -1 for max threads</div>
     htmCollapsed: true,
     minerCollapsed: true,
     feedCollapsed: false,
+    theme: "dark",
+    feedRows: 10,
 
     feedMode: FEED_MODE_ALL,
     feedMinerOnly: false,
@@ -972,6 +1105,7 @@ count = -1  # -1 for max threads</div>
   const statusDot = el("status-dot");
   const statusText = el("status-text");
   const lastEvt = el("last-evt");
+  const themeToggle = el("theme-toggle");
 
   const kpiMiners = el("kpi-miners");
   const kpiEff = el("kpi-eff");
@@ -999,6 +1133,7 @@ count = -1  # -1 for max threads</div>
   const netLastHash = el("net-last-hash");
 
   const feed = el("feed");
+  const feedViewport = el("feed-viewport");
 
   const htmCard = el("howtomine-card");
   const htmCollapseBtn = el("htm-collapse-btn");
@@ -1044,6 +1179,9 @@ count = -1  # -1 for max threads</div>
   const feedBlocks = el("feed-blocks");
   const feedPayouts = el("feed-payouts");
   const feedMinerOnly = el("feed-miner-only");
+  const feedRows5 = el("feed-rows-5");
+  const feedRows10 = el("feed-rows-10");
+  const feedRows20 = el("feed-rows-20");
 
   // -------------------------------------------------------------------------
   // Small helpers
@@ -1262,9 +1400,15 @@ count = -1  # -1 for max threads</div>
       if(typeof obj.minerCollapsed==="boolean") state.minerCollapsed=obj.minerCollapsed;
       if(typeof obj.htmCollapsed==="boolean") state.htmCollapsed=obj.htmCollapsed;
       if(typeof obj.feedCollapsed==="boolean") state.feedCollapsed=obj.feedCollapsed;
+      if(obj.theme==="light"||obj.theme==="dark") state.theme=obj.theme;
+      if([5,10,20].includes(Number(obj.feedRows))) state.feedRows=Number(obj.feedRows);
     }
   }
-  function saveUiPrefs(){ try{ localStorage.setItem(UI_KEY,JSON.stringify({minerCollapsed:state.minerCollapsed,htmCollapsed:state.htmCollapsed,feedCollapsed:state.feedCollapsed})); } catch {} }
+  function saveUiPrefs(){ try{ localStorage.setItem(UI_KEY,JSON.stringify({minerCollapsed:state.minerCollapsed,htmCollapsed:state.htmCollapsed,feedCollapsed:state.feedCollapsed,theme:state.theme,feedRows:state.feedRows})); } catch {} }
+  function applyTheme(){
+    document.body.setAttribute("data-theme",state.theme);
+    if(themeToggle) themeToggle.textContent = state.theme==="light" ? "Theme: Light" : "Theme: Dark";
+  }
 
   function loadPersisted(){
     const raw=localStorage.getItem(LS_KEY);
@@ -1456,6 +1600,14 @@ count = -1  # -1 for max threads</div>
     feedBlocks.classList.toggle("on",state.feedMode===FEED_MODE_BLOCKS);
     feedPayouts.classList.toggle("on",state.feedMode===FEED_MODE_PAYOUTS);
     feedMinerOnly.classList.toggle("on",!!state.feedMinerOnly);
+    feedRows5.classList.toggle("on",state.feedRows===5);
+    feedRows10.classList.toggle("on",state.feedRows===10);
+    feedRows20.classList.toggle("on",state.feedRows===20);
+  }
+
+  function applyFeedRows(){
+    const rows=[5,10,20].includes(state.feedRows)?state.feedRows:10;
+    if(feedViewport) feedViewport.style.setProperty("--feed-rows",String(rows));
   }
 
   // -------------------------------------------------------------------------
@@ -1964,6 +2116,9 @@ count = -1  # -1 for max threads</div>
   feedBlocks.addEventListener("click",()=>{ state.feedMode=FEED_MODE_BLOCKS; updateKpis(); renderFeed(); });
   feedPayouts.addEventListener("click",()=>{ state.feedMode=FEED_MODE_PAYOUTS; updateKpis(); renderFeed(); });
   feedMinerOnly.addEventListener("click",()=>{ state.feedMinerOnly=!state.feedMinerOnly; updateKpis(); renderFeed(); });
+  feedRows5.addEventListener("click",()=>{ state.feedRows=5; applyFeedRows(); saveUiPrefs(); updateKpis(); });
+  feedRows10.addEventListener("click",()=>{ state.feedRows=10; applyFeedRows(); saveUiPrefs(); updateKpis(); });
+  feedRows20.addEventListener("click",()=>{ state.feedRows=20; applyFeedRows(); saveUiPrefs(); updateKpis(); });
 
   window.addEventListener("resize",()=>markChartsDirty("all"));
 
@@ -2000,6 +2155,14 @@ count = -1  # -1 for max threads</div>
   })();
 
   loadUiPrefs();
+  applyTheme();
+  if(themeToggle){
+    themeToggle.addEventListener("click",()=>{
+      state.theme = state.theme==="dark" ? "light" : "dark";
+      applyTheme();
+      saveUiPrefs();
+    });
+  }
   loadPersisted();
   pruneBlocksByDay();
   pruneBlocksByHour();
@@ -2008,6 +2171,7 @@ count = -1  # -1 for max threads</div>
   applyHtmCollapsed();
   applyMinerCollapsed();
   applyFeedCollapsed();
+  applyFeedRows();
   updateKpis();
   renderFeed();
   fetchSnapshot();
