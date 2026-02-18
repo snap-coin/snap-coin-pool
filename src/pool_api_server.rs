@@ -1,7 +1,7 @@
 // ============================================================================
 // File: pool_api_server.rs
 // Location: snap-coin-pool-v2/src/pool_api_server.rs
-// Version: 0.1.4-stats.20
+// Version: 0.1.4-stats.21
 //
 // Description:
 // Upstream pool API server (logic preserved) with OPTIONAL instrumentation hooks
@@ -49,6 +49,13 @@
 // - ADD: Emit MinerUnbanned via PoolEvent when score_decay_task clears `entry.banned`
 //   (score decays below BAN_THRESHOLD). Purely observational; no behavior changes.
 // - FIX: Ensure no await occurs while ip_scores mutex is held (collect then emit).
+//
+// FIX (v0.1.4-stats.21):
+// - FIX: Emit MinerConnected and MinerDisconnected unconditionally on every
+//   individual connection and disconnection event.
+// - REMOVE: All `by_ip == 1` guards that were suppressing telemetry events for
+//   miners with more than one concurrent connection from the same IP.
+//   The by_ip count is used only for connection limiting, not event filtering.
 // ============================================================================
 
 use anyhow::anyhow;
@@ -394,14 +401,13 @@ impl PoolServer {
         let miner_key = format!("{:?}", client_address);
         let mut reject_streak: u32 = 0;
 
-        if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
-            self.emit(PoolEvent::MinerConnected {
-                miner: miner_key.clone(),
-                ip: ip.clone(),
-                timestamp: now_ts(),
-            })
-            .await;
-        }
+        // FIX v0.1.4-stats.21: emit MinerConnected unconditionally for every connection.
+        self.emit(PoolEvent::MinerConnected {
+            miner: miner_key.clone(),
+            ip: ip.clone(),
+            timestamp: now_ts(),
+        })
+        .await;
 
         loop {
             // Passive heartbeat: if no request arrives within HEARTBEAT_IDLE_SECS, drop connection.
@@ -498,16 +504,14 @@ impl PoolServer {
                                         })
                                         .await;
 
-                                        if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1)
-                                            == &1
-                                        {
-                                            self.emit(PoolEvent::MinerDisconnected {
-                                                miner: miner_key.clone(),
-                                                ip: ip.clone(),
-                                                timestamp: now_ts(),
-                                            })
-                                            .await;
-                                        }
+                                        // FIX v0.1.4-stats.21: emit MinerDisconnected
+                                        // unconditionally on watchdog kick disconnect.
+                                        self.emit(PoolEvent::MinerDisconnected {
+                                            miner: miner_key.clone(),
+                                            ip: ip.clone(),
+                                            timestamp: now_ts(),
+                                        })
+                                        .await;
 
                                         let _ = stream.shutdown().await;
 
@@ -577,28 +581,27 @@ impl PoolServer {
                 println!("Miner error from {} miner={}: {}", ip, miner_key, e);
                 self.add_penalty(ip.clone()).await;
 
-                if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
-                    self.emit(PoolEvent::MinerDisconnected {
-                        miner: miner_key.clone(),
-                        ip: ip.clone(),
-                        timestamp: now_ts(),
-                    })
-                    .await;
-                }
+                // FIX v0.1.4-stats.21: emit MinerDisconnected unconditionally on error exit.
+                self.emit(PoolEvent::MinerDisconnected {
+                    miner: miner_key.clone(),
+                    ip: ip.clone(),
+                    timestamp: now_ts(),
+                })
+                .await;
 
                 break;
             }
         }
 
         self.unregister_connection(&miner_key, &ip).await;
-        if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
-            self.emit(PoolEvent::MinerDisconnected {
-                miner: miner_key,
-                ip,
-                timestamp: now_ts(),
-            })
-            .await;
-        }
+
+        // FIX v0.1.4-stats.21: emit MinerDisconnected unconditionally on clean loop exit.
+        self.emit(PoolEvent::MinerDisconnected {
+            miner: miner_key,
+            ip,
+            timestamp: now_ts(),
+        })
+        .await;
     }
 
     // ── Listen (logic preserved; telemetry added) ──────────────────────────
@@ -832,9 +835,8 @@ fn now_ts() -> u64 {
 // ============================================================================
 // File: pool_api_server.rs
 // Location: snap-coin-pool-v2/src/pool_api_server.rs
-// Version: 0.1.4-stats.20
+// Version: 0.1.4-stats.21
 // Updated: 2026-02-17
 // ============================================================================
 // Generated: 2026-02-17T00:00:00Z
-// LOC: (not auto-counted)
 // ============================================================================
