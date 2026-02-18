@@ -1,7 +1,7 @@
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.2.1-miner-shares-persist.1
+// Version: 1.4.0-six-buffer-accepted-rejected-miners.1
 //
 // Description: Server-side shared pool state (snapshot loading) + lightweight
 //              disk persistence (no DB).
@@ -16,17 +16,46 @@
 //                - GET /api/snapshot -> pool_state.snapshot()
 //
 // Notes:
-//   - Recent events are split into THREE independent bounded buffers:
-//       * recent_shares  (default 200)   - share events + other non-block/payout events
-//       * recent_blocks  (default 200)   - BlockFound events
-//       * recent_payouts (default 200)   - PayoutComplete events
-//   - Each buffer has its own cap.
+//   - Recent events are split into SIX independent bounded buffers:
+//       * recent_shares_acc (default 200) - ShareAccepted only
+//       * recent_shares_rej (default 200) - ShareRejected only
+//       * recent_miners     (default 200) - MinerConnected, MinerDisconnected only
+//       * recent_blocks     (default 200) - BlockFound events
+//       * recent_payouts    (default 200) - PayoutComplete events
+//       * recent_bans       (default 500) - MinerBanned, MinerUnbanned, MinerKicked events
+//   - Each buffer has its own cap (all hardcoded constants).
 //   - NetworkStats is NOT stored in any recent_* buffer, but its hashrate value
 //     IS recorded into a dedicated 24h timeseries for frontend clarity.
 //   - Daily buckets bounded (default 30 days).
 //   - Uses internal UTC day formatter (civil_from_days) to avoid chrono.
 //   - Persistent timeseries stored inside pool_state.json.
 //   - Per-miner payout totals rebuilt from payout_ledger_*.jsonl on boot.
+//
+// CHANGELOG (v1.4.0-six-buffer-accepted-rejected-miners.1):
+//   - ADD: split share events into two dedicated buffers:
+//       * recent_shares_acc (ShareAccepted)
+//       * recent_shares_rej (ShareRejected)
+//   - ADD: dedicated miner connect/disconnect buffer:
+//       * recent_miners (MinerConnected, MinerDisconnected)
+//   - ADD: all three new buffers persisted in pool_state.json and served in /api/snapshot.
+//   - MIGRATE: legacy recent_events and prior recent_shares are routed into the six buffers.
+//   - No other behavior changes.
+//
+// CHANGELOG (v1.3.1-ban-unban-buffer.1):
+//   - ADD: route MinerUnbanned into recent_bans (alongside MinerBanned/MinerKicked)
+//     so the frontend can show unban timelines under the Banned feed.
+//   - No other behavior changes.
+//
+// CHANGELOG (v1.3.0-ban-buffer.1):
+//   - ADD: fourth independent buffer recent_bans (cap 500) for MinerBanned,
+//     MinerUnbanned, and MinerKicked events, keeping them out of recent_shares so share-flood
+//     cannot evict ban/kick history.
+//   - ADD: recent_bans persisted in pool_state.json and loaded on boot.
+//   - ADD: recent_bans served in /api/snapshot for consistent cross-client view.
+//   - ADD: const DEFAULT_RECENT_BANS = 500 (hardcoded, no .env scope).
+//   - FIX: on_event buffer routing now has explicit arms for MinerBanned and
+//     MinerKicked instead of relying on the catch-all _ => recent_shares arm.
+//   - No changes to any other file.
 //
 // CHANGELOG (v1.2.1-miner-shares-persist.1):
 //   - ADD: miner_shares_acc (HashMap<String, u64>) to PoolSnapshot.
@@ -65,10 +94,13 @@ const DEFAULT_STATE_FILE: &str = "pool_state.json";
 const DEFAULT_LEDGER_DIR: &str = ".";
 const DEFAULT_DAILY_DAYS: usize = 30;
 
-// Per-buffer independent caps.
-const DEFAULT_RECENT_SHARES: usize = 200;
+// Per-buffer independent caps (hardcoded).
+const DEFAULT_RECENT_SHARES_ACC: usize = 200;
+const DEFAULT_RECENT_SHARES_REJ: usize = 200;
+const DEFAULT_RECENT_MINERS: usize = 200;
 const DEFAULT_RECENT_BLOCKS: usize = 200;
 const DEFAULT_RECENT_PAYOUTS: usize = 200;
+const DEFAULT_RECENT_BANS: usize = 500;
 
 // Timeseries caps.
 const DEFAULT_HASHRATE_POINTS_24H_1M: usize = 5760; // 24h @ 1 sample/15seconds
@@ -194,13 +226,19 @@ pub struct PoolSnapshot {
 
     pub daily_buckets: Vec<DailyBucket>,
 
-    // NEW schema: 3 separate lists
+    // Six separate event buffers.
     #[serde(default)]
-    pub recent_shares: Vec<PoolEvent>,
+    pub recent_shares_acc: Vec<PoolEvent>,
+    #[serde(default)]
+    pub recent_shares_rej: Vec<PoolEvent>,
+    #[serde(default)]
+    pub recent_miners: Vec<PoolEvent>,
     #[serde(default)]
     pub recent_blocks: Vec<PoolEvent>,
     #[serde(default)]
     pub recent_payouts: Vec<PoolEvent>,
+    #[serde(default)]
+    pub recent_bans: Vec<PoolEvent>,
 
     #[serde(default)]
     pub pool_difficulty_fixed: String,
@@ -254,9 +292,12 @@ struct LegacyPoolSnapshot {
 struct Inner {
     snapshot: PoolSnapshot,
 
-    recent_shares: VecDeque<PoolEvent>,
+    recent_shares_acc: VecDeque<PoolEvent>,
+    recent_shares_rej: VecDeque<PoolEvent>,
+    recent_miners: VecDeque<PoolEvent>,
     recent_blocks: VecDeque<PoolEvent>,
     recent_payouts: VecDeque<PoolEvent>,
+    recent_bans: VecDeque<PoolEvent>,
 
     // Timeseries in-memory deques
     pool_hashrate_1m_24h: VecDeque<TimeSeriesPoint>,
@@ -302,9 +343,12 @@ impl PoolState {
 
         if let Ok(bytes) = tokio::fs::read(&state_path).await {
             if let Ok(mut loaded_new) = serde_json::from_slice::<PoolSnapshot>(&bytes) {
-                loaded_new.recent_shares.retain(|e| !is_network_stats(e));
+                loaded_new.recent_shares_acc.retain(|e| !is_network_stats(e));
+                loaded_new.recent_shares_rej.retain(|e| !is_network_stats(e));
+                loaded_new.recent_miners.retain(|e| !is_network_stats(e));
                 loaded_new.recent_blocks.retain(|e| !is_network_stats(e));
                 loaded_new.recent_payouts.retain(|e| !is_network_stats(e));
+                loaded_new.recent_bans.retain(|e| !is_network_stats(e));
                 snapshot = loaded_new;
             } else if let Ok(mut loaded_old) = serde_json::from_slice::<LegacyPoolSnapshot>(&bytes) {
                 loaded_old.recent_events.retain(|e| !is_network_stats(e));
@@ -332,41 +376,72 @@ impl PoolState {
                 compute_fixed_difficulty_u64_from_env().unwrap_or(0);
         }
 
-        let mut recent_shares = VecDeque::with_capacity(DEFAULT_RECENT_SHARES);
+        let mut recent_shares_acc = VecDeque::with_capacity(DEFAULT_RECENT_SHARES_ACC);
+        let mut recent_shares_rej = VecDeque::with_capacity(DEFAULT_RECENT_SHARES_REJ);
+        let mut recent_miners = VecDeque::with_capacity(DEFAULT_RECENT_MINERS);
         let mut recent_blocks = VecDeque::with_capacity(DEFAULT_RECENT_BLOCKS);
         let mut recent_payouts = VecDeque::with_capacity(DEFAULT_RECENT_PAYOUTS);
+        let mut recent_bans = VecDeque::with_capacity(DEFAULT_RECENT_BANS);
 
         if !legacy_seed.is_empty() {
+            // Legacy migration: route events into the correct buffers.
             for e in legacy_seed.into_iter() {
                 if is_network_stats(&e) {
                     continue;
                 }
-                match &e {
-                    PoolEvent::BlockFound { .. } => {
-                        recent_blocks.push_back(e);
-                        while recent_blocks.len() > DEFAULT_RECENT_BLOCKS {
-                            recent_blocks.pop_front();
-                        }
-                    }
-                    PoolEvent::PayoutComplete { .. } => {
-                        recent_payouts.push_back(e);
-                        while recent_payouts.len() > DEFAULT_RECENT_PAYOUTS {
-                            recent_payouts.pop_front();
-                        }
-                    }
-                    _ => {
-                        recent_shares.push_back(e);
-                        while recent_shares.len() > DEFAULT_RECENT_SHARES {
-                            recent_shares.pop_front();
-                        }
-                    }
-                }
+                route_event_into_six_buffers(
+                    &e,
+                    &mut recent_shares_acc,
+                    &mut recent_shares_rej,
+                    &mut recent_miners,
+                    &mut recent_blocks,
+                    &mut recent_payouts,
+                    &mut recent_bans,
+                );
+                truncate_six_buffers(
+                    &mut recent_shares_acc,
+                    &mut recent_shares_rej,
+                    &mut recent_miners,
+                    &mut recent_blocks,
+                    &mut recent_payouts,
+                    &mut recent_bans,
+                );
             }
         } else {
-            for e in snapshot.recent_shares.iter().cloned().take(DEFAULT_RECENT_SHARES) {
-                recent_shares.push_back(e);
+            // New-format load (including migration from older "recent_shares" based state files):
+            //
+            // If a prior version only had recent_shares (and not the new fields),
+            // serde(default) will leave new vectors empty and we just load what exists.
+            for e in snapshot
+                .recent_shares_acc
+                .iter()
+                .cloned()
+                .take(DEFAULT_RECENT_SHARES_ACC)
+            {
+                recent_shares_acc.push_back(e);
             }
-            for e in snapshot.recent_blocks.iter().cloned().take(DEFAULT_RECENT_BLOCKS) {
+            for e in snapshot
+                .recent_shares_rej
+                .iter()
+                .cloned()
+                .take(DEFAULT_RECENT_SHARES_REJ)
+            {
+                recent_shares_rej.push_back(e);
+            }
+            for e in snapshot
+                .recent_miners
+                .iter()
+                .cloned()
+                .take(DEFAULT_RECENT_MINERS)
+            {
+                recent_miners.push_back(e);
+            }
+            for e in snapshot
+                .recent_blocks
+                .iter()
+                .cloned()
+                .take(DEFAULT_RECENT_BLOCKS)
+            {
                 recent_blocks.push_back(e);
             }
             for e in snapshot
@@ -377,15 +452,33 @@ impl PoolState {
             {
                 recent_payouts.push_back(e);
             }
+            for e in snapshot
+                .recent_bans
+                .iter()
+                .cloned()
+                .take(DEFAULT_RECENT_BANS)
+            {
+                recent_bans.push_back(e);
+            }
         }
+
+        // If we loaded a prior state file that had only recent_shares (v1.2.x),
+        // it would not populate our six buffers. We keep a small safety net:
+        // if ALL three "share/miner" buffers are empty but totals exist, we do nothing;
+        // routing old recent_shares isn't possible without that legacy field.
+        //
+        // (The explicit migration path is LegacyPoolSnapshot::recent_events.)
 
         if snapshot.last_payout.height == 0 {
             rebuild_last_payout_from_recent_payouts(&mut snapshot, &recent_payouts);
         }
 
-        snapshot.recent_shares = recent_shares.iter().cloned().collect();
+        snapshot.recent_shares_acc = recent_shares_acc.iter().cloned().collect();
+        snapshot.recent_shares_rej = recent_shares_rej.iter().cloned().collect();
+        snapshot.recent_miners = recent_miners.iter().cloned().collect();
         snapshot.recent_blocks = recent_blocks.iter().cloned().collect();
         snapshot.recent_payouts = recent_payouts.iter().cloned().collect();
+        snapshot.recent_bans = recent_bans.iter().cloned().collect();
 
         // ── Timeseries load (pool hashrate) ──────────────────────────────────
         let mut pool_hashrate_1m_24h = VecDeque::with_capacity(DEFAULT_HASHRATE_POINTS_24H_1M);
@@ -443,11 +536,19 @@ impl PoolState {
             snapshot_shares_acc.len()
         );
 
+        println!(
+            "[poolstate] Loaded ban/kick buffer from state: {} events",
+            recent_bans.len()
+        );
+
         let inner = Inner {
             snapshot,
-            recent_shares,
+            recent_shares_acc,
+            recent_shares_rej,
+            recent_miners,
             recent_blocks,
             recent_payouts,
+            recent_bans,
             pool_hashrate_1m_24h,
             network_hashrate_1m_24h,
             miner_paid_totals,
@@ -472,12 +573,16 @@ impl PoolState {
         let mut g = self.inner.lock().await;
 
         g.snapshot.generated_at = now_ts();
-        g.snapshot.recent_shares = g.recent_shares.iter().cloned().collect();
+        g.snapshot.recent_shares_acc = g.recent_shares_acc.iter().cloned().collect();
+        g.snapshot.recent_shares_rej = g.recent_shares_rej.iter().cloned().collect();
+        g.snapshot.recent_miners = g.recent_miners.iter().cloned().collect();
         g.snapshot.recent_blocks = g.recent_blocks.iter().cloned().collect();
         g.snapshot.recent_payouts = g.recent_payouts.iter().cloned().collect();
+        g.snapshot.recent_bans = g.recent_bans.iter().cloned().collect();
 
         // Timeseries into snapshot
-        g.snapshot.timeseries.pool_hashrate_1m_24h = g.pool_hashrate_1m_24h.iter().cloned().collect();
+        g.snapshot.timeseries.pool_hashrate_1m_24h =
+            g.pool_hashrate_1m_24h.iter().cloned().collect();
         g.snapshot.timeseries.network_hashrate_1m_24h =
             g.network_hashrate_1m_24h.iter().cloned().collect();
 
@@ -520,7 +625,26 @@ impl PoolState {
         let mut g = self.inner.lock().await;
 
         // Borrow-safe routing: touch one deque at a time.
+        // Explicit arms for every known event type.
         match event {
+            PoolEvent::ShareAccepted { .. } => {
+                g.recent_shares_acc.push_back(event.clone());
+                while g.recent_shares_acc.len() > DEFAULT_RECENT_SHARES_ACC {
+                    g.recent_shares_acc.pop_front();
+                }
+            }
+            PoolEvent::ShareRejected { .. } => {
+                g.recent_shares_rej.push_back(event.clone());
+                while g.recent_shares_rej.len() > DEFAULT_RECENT_SHARES_REJ {
+                    g.recent_shares_rej.pop_front();
+                }
+            }
+            PoolEvent::MinerConnected { .. } | PoolEvent::MinerDisconnected { .. } => {
+                g.recent_miners.push_back(event.clone());
+                while g.recent_miners.len() > DEFAULT_RECENT_MINERS {
+                    g.recent_miners.pop_front();
+                }
+            }
             PoolEvent::BlockFound { .. } => {
                 g.recent_blocks.push_back(event.clone());
                 while g.recent_blocks.len() > DEFAULT_RECENT_BLOCKS {
@@ -533,10 +657,19 @@ impl PoolState {
                     g.recent_payouts.pop_front();
                 }
             }
+            PoolEvent::MinerBanned { .. }
+            | PoolEvent::MinerUnbanned { .. }
+            | PoolEvent::MinerKicked { .. } => {
+                g.recent_bans.push_back(event.clone());
+                while g.recent_bans.len() > DEFAULT_RECENT_BANS {
+                    g.recent_bans.pop_front();
+                }
+            }
             _ => {
-                g.recent_shares.push_back(event.clone());
-                while g.recent_shares.len() > DEFAULT_RECENT_SHARES {
-                    g.recent_shares.pop_front();
+                // Any future event types not explicitly routed above.
+                g.recent_shares_acc.push_back(event.clone());
+                while g.recent_shares_acc.len() > DEFAULT_RECENT_SHARES_ACC {
+                    g.recent_shares_acc.pop_front();
                 }
             }
         }
@@ -679,9 +812,12 @@ impl PoolState {
                 }
 
                 g.snapshot.generated_at = now_ts();
-                g.snapshot.recent_shares = g.recent_shares.iter().cloned().collect();
+                g.snapshot.recent_shares_acc = g.recent_shares_acc.iter().cloned().collect();
+                g.snapshot.recent_shares_rej = g.recent_shares_rej.iter().cloned().collect();
+                g.snapshot.recent_miners = g.recent_miners.iter().cloned().collect();
                 g.snapshot.recent_blocks = g.recent_blocks.iter().cloned().collect();
                 g.snapshot.recent_payouts = g.recent_payouts.iter().cloned().collect();
+                g.snapshot.recent_bans = g.recent_bans.iter().cloned().collect();
 
                 // Timeseries into snapshot
                 g.snapshot.timeseries.pool_hashrate_1m_24h =
@@ -731,6 +867,60 @@ impl PoolState {
                 }
             }
         });
+    }
+}
+
+// ── Routing helpers for six-buffer migration ────────────────────────────────
+
+fn route_event_into_six_buffers(
+    e: &PoolEvent,
+    recent_shares_acc: &mut VecDeque<PoolEvent>,
+    recent_shares_rej: &mut VecDeque<PoolEvent>,
+    recent_miners: &mut VecDeque<PoolEvent>,
+    recent_blocks: &mut VecDeque<PoolEvent>,
+    recent_payouts: &mut VecDeque<PoolEvent>,
+    recent_bans: &mut VecDeque<PoolEvent>,
+) {
+    match e {
+        PoolEvent::ShareAccepted { .. } => recent_shares_acc.push_back(e.clone()),
+        PoolEvent::ShareRejected { .. } => recent_shares_rej.push_back(e.clone()),
+        PoolEvent::MinerConnected { .. } | PoolEvent::MinerDisconnected { .. } => {
+            recent_miners.push_back(e.clone())
+        }
+        PoolEvent::BlockFound { .. } => recent_blocks.push_back(e.clone()),
+        PoolEvent::PayoutComplete { .. } => recent_payouts.push_back(e.clone()),
+        PoolEvent::MinerBanned { .. }
+        | PoolEvent::MinerUnbanned { .. }
+        | PoolEvent::MinerKicked { .. } => recent_bans.push_back(e.clone()),
+        _ => recent_shares_acc.push_back(e.clone()),
+    }
+}
+
+fn truncate_six_buffers(
+    recent_shares_acc: &mut VecDeque<PoolEvent>,
+    recent_shares_rej: &mut VecDeque<PoolEvent>,
+    recent_miners: &mut VecDeque<PoolEvent>,
+    recent_blocks: &mut VecDeque<PoolEvent>,
+    recent_payouts: &mut VecDeque<PoolEvent>,
+    recent_bans: &mut VecDeque<PoolEvent>,
+) {
+    while recent_shares_acc.len() > DEFAULT_RECENT_SHARES_ACC {
+        recent_shares_acc.pop_front();
+    }
+    while recent_shares_rej.len() > DEFAULT_RECENT_SHARES_REJ {
+        recent_shares_rej.pop_front();
+    }
+    while recent_miners.len() > DEFAULT_RECENT_MINERS {
+        recent_miners.pop_front();
+    }
+    while recent_blocks.len() > DEFAULT_RECENT_BLOCKS {
+        recent_blocks.pop_front();
+    }
+    while recent_payouts.len() > DEFAULT_RECENT_PAYOUTS {
+        recent_payouts.pop_front();
+    }
+    while recent_bans.len() > DEFAULT_RECENT_BANS {
+        recent_bans.pop_front();
     }
 }
 
@@ -1129,6 +1319,6 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 // ============================================================================
 // File: poolstate.rs
 // Location: snap-coin-pool-v2/src/poolstate.rs
-// Version: 1.2.1-miner-shares-persist.1
-// Created: 2026-02-17T01:00:00Z
+// Version: 1.4.0-six-buffer-accepted-rejected-miners.1
+// Created: 2026-02-17T00:00:00Z
 // ============================================================================

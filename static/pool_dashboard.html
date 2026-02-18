@@ -1,11 +1,14 @@
 <!-- =========================================================================
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
-Version: 1.7.1-pool-address.1
+Version: 1.7.2-feed-rejects-banned.1
 
-Changes from v1.7.0-howtomine-feedcollapse.1:
-  - Pool connect address loaded dynamically from /static/pool-address
-  - Removed hardcoded IP:PORT from dashboard HTML
+Changes from v1.7.1-pool-address.1:
+  - Live Event Feed: add two new filter chips:
+      * Rejected  -> shows ShareRejected events only
+      * Banned    -> shows MinerBanned/MinerUnbanned (and common Ban/Unban aliases) events only
+  - Frontend supports optional snapshot banned-miner lists (if backend adds them later):
+      * snap.banned_miners / snap.bannedMiners / snap.bans / snap.ban_list
 ========================================================================  -->
 <!DOCTYPE html>
 <html lang="en">
@@ -566,6 +569,7 @@ Changes from v1.7.0-howtomine-feedcollapse.1:
     .evt.payout{ border-left-color: var(--cyan); }
     .evt.miner{ border-left-color: rgba(255,255,255,0.35); }
     .evt.minerpay{ border-left-color: var(--magenta); }
+    .evt.ban{ border-left-color: var(--orange); }
 
     .collapse-btn{
       padding: 6px 10px;
@@ -970,7 +974,7 @@ count = -1  # -1 for max threads</div>
           <div class="head">
             <div class="head-title-group">
               <h2>Live Event Feed (last 200)</h2>
-              
+
               <div class="feed-rows-bar">
                 <span class="hint">Rows:</span>
                 <div id="feed-rows-5" class="chip">5</div>
@@ -984,6 +988,8 @@ count = -1  # -1 for max threads</div>
               <div id="feed-blocks" class="chip">Blocks</div>
               <div id="feed-payouts" class="chip">Payouts</div>
               <div id="feed-miner-only" class="chip" title="Show only events for the current Miner Check addy">Miner</div>
+              <div id="feed-rejects" class="chip">Rejected</div>
+              <div id="feed-banned" class="chip">Banned</div>
               <div id="feed-collapse-btn" class="collapse-btn" title="Collapse/expand Live Event Feed">Collapse</div>
             </div>
           </div>
@@ -1029,8 +1035,10 @@ count = -1  # -1 for max threads</div>
 
   const FEED_MODE_ALL = "all";
   const FEED_MODE_SHARES = "shares";
+  const FEED_MODE_REJECTS = "rejects";
   const FEED_MODE_BLOCKS = "blocks";
   const FEED_MODE_PAYOUTS = "payouts";
+  const FEED_MODE_BANNED = "banned";
 
   const EXPLORER_TX_BASE = "https://explorer.snap-coin.net/tx/";
   const EXPLORER_BLOCK_BASE = "https://explorer.snap-coin.net/block/";
@@ -1068,6 +1076,9 @@ count = -1  # -1 for max threads</div>
     seenBlockKeys: new Set(),
 
     miners: new Map(),
+
+    // optional backend support (future): track banned miners (map by minerId)
+    bannedMiners: {},
 
     net: {
       hashrate_hs: null,
@@ -1185,8 +1196,10 @@ count = -1  # -1 for max threads</div>
 
   const feedAll = el("feed-all");
   const feedShares = el("feed-shares");
+  const feedRejects = el("feed-rejects");
   const feedBlocks = el("feed-blocks");
   const feedPayouts = el("feed-payouts");
+  const feedBanned = el("feed-banned");
   const feedMinerOnly = el("feed-miner-only");
   const feedRows5 = el("feed-rows-5");
   const feedRows10 = el("feed-rows-10");
@@ -1304,6 +1317,26 @@ count = -1  # -1 for max threads</div>
     if(sa!==undefined&&isFinite(Number(sa))) state.sharesAccepted=Number(sa);
     if(sr!==undefined&&isFinite(Number(sr))) state.sharesRejected=Number(sr);
     if(bf!==undefined&&isFinite(Number(bf))) state.blocksFound=Number(bf);
+
+    // ── Optional bans list (future backend) ──
+    const bansList = pick(snap,["banned_miners","bannedMiners","bans","ban_list"]);
+    if(Array.isArray(bansList)){
+      const out={};
+      for(const b of bansList){
+        if(!b) continue;
+        const miner=String(pick(b,["miner","id","public","address"])??"").trim();
+        if(!miner) continue;
+        out[miner]={
+          miner,
+          banned_at: pick(b,["banned_at","bannedAt","ts","timestamp"]),
+          unbanned_at: pick(b,["unbanned_at","unbannedAt"]),
+          until: pick(b,["until","expires_at","expiresAt"]),
+          reason: String(pick(b,["reason","msg","message"])??"").trim(),
+          active: (pick(b,["active","is_banned","isBanned"])!==undefined) ? !!pick(b,["active","is_banned","isBanned"]) : true,
+        };
+      }
+      state.bannedMiners=out;
+    }
 
     // ── Timeseries load ──
     const tsRoot=(snap.timeseries&&typeof snap.timeseries==="object")?snap.timeseries:null;
@@ -1586,16 +1619,28 @@ count = -1  # -1 for max threads</div>
   // -------------------------------------------------------------------------
   const FEED_MAX=2000;
   function pushFeedEvent(e){ state.feedEvents.unshift(e); if(state.feedEvents.length>FEED_MAX) state.feedEvents.splice(FEED_MAX); if(!state.replayingSnapshot) renderFeed(); }
-  function feedModeMatches(cat){ return state.feedMode===FEED_MODE_ALL||cat===state.feedMode; }
+
+  function feedModeMatches(e){
+    const mode=state.feedMode;
+    if(mode===FEED_MODE_ALL) return true;
+    if(mode===FEED_MODE_SHARES) return e.cat===FEED_MODE_SHARES;
+    if(mode===FEED_MODE_REJECTS) return e.typeClass==="reject";
+    if(mode===FEED_MODE_BLOCKS) return e.cat===FEED_MODE_BLOCKS;
+    if(mode===FEED_MODE_PAYOUTS) return e.cat===FEED_MODE_PAYOUTS;
+    if(mode===FEED_MODE_BANNED) return e.cat===FEED_MODE_BANNED;
+    return true;
+  }
+
   function feedMinerMatches(minersArr){
     if(!state.feedMinerOnly) return true;
     const cur=(minerInput.value||"").trim(); if(!cur) return true;
     return Array.isArray(minersArr)&&minersArr.includes(cur);
   }
+
   function renderFeed(){
     feed.innerHTML="";
     for(const e of state.feedEvents){
-      if(!feedModeMatches(e.cat)) continue;
+      if(!feedModeMatches(e)) continue;
       if(!feedMinerMatches(e.miners)) continue;
       const d=document.createElement("div"); d.className="evt "+e.typeClass;
       const t=new Date(e.tsMs).toLocaleTimeString();
@@ -1603,11 +1648,14 @@ count = -1  # -1 for max threads</div>
       feed.appendChild(d);
     }
   }
+
   function updateFeedChips(){
     feedAll.classList.toggle("on",state.feedMode===FEED_MODE_ALL);
     feedShares.classList.toggle("on",state.feedMode===FEED_MODE_SHARES);
+    feedRejects.classList.toggle("on",state.feedMode===FEED_MODE_REJECTS);
     feedBlocks.classList.toggle("on",state.feedMode===FEED_MODE_BLOCKS);
     feedPayouts.classList.toggle("on",state.feedMode===FEED_MODE_PAYOUTS);
+    feedBanned.classList.toggle("on",state.feedMode===FEED_MODE_BANNED);
     feedMinerOnly.classList.toggle("on",!!state.feedMinerOnly);
     feedRows5.classList.toggle("on",state.feedRows===5);
     feedRows10.classList.toggle("on",state.feedRows===10);
@@ -1998,6 +2046,33 @@ count = -1  # -1 for max threads</div>
         if(!replay) refreshMinerPicker(); break;
       }
 
+      // ── Ban events (supports several common names) ──
+      case "MinerBanned":
+      case "Ban":
+      case "Banned": {
+        const miner=String(ev.miner??ev.id??ev.public??"").trim();
+        const reason=String(ev.reason??ev.message??ev.msg??"").trim();
+        const until=ev.until??ev.expires_at??ev.expiresAt??null;
+        if(miner){
+          state.bannedMiners[miner]={miner,reason,until,active:true,banned_at:ev.timestamp??null,unbanned_at:null};
+        }
+        pushFeedEvent({tsMs:Date.now(),typeClass:"ban",cat:FEED_MODE_BANNED,tag:"Banned",html:`${minerSpan(miner,"accent-orange")} <span class="t">${escapeHtml(reason||"")}</span>`+(until?` <span class="t">until=${escapeHtml(String(until))}</span>`:``),miners:miner?[miner]:[]});
+        break;
+      }
+
+      case "MinerUnbanned":
+      case "Unban":
+      case "Unbanned": {
+        const miner=String(ev.miner??ev.id??ev.public??"").trim();
+        const reason=String(ev.reason??ev.message??ev.msg??"").trim();
+        if(miner && state.bannedMiners[miner]){
+          state.bannedMiners[miner].active=false;
+          state.bannedMiners[miner].unbanned_at=ev.timestamp??null;
+        }
+        pushFeedEvent({tsMs:Date.now(),typeClass:"ban",cat:FEED_MODE_BANNED,tag:"Unbanned",html:`${minerSpan(miner,"accent-green")} <span class="t">${escapeHtml(reason||"")}</span>`,miners:miner?[miner]:[]});
+        break;
+      }
+
       case "BlockFound": {
         const height=(ev.height!==undefined&&ev.height!==null)?Number(ev.height):null;
         const reward=(ev.reward!==undefined&&ev.reward!==null)?ev.reward:null;
@@ -2122,8 +2197,10 @@ count = -1  # -1 for max threads</div>
 
   feedAll.addEventListener("click",()=>{ state.feedMode=FEED_MODE_ALL; updateKpis(); renderFeed(); });
   feedShares.addEventListener("click",()=>{ state.feedMode=FEED_MODE_SHARES; updateKpis(); renderFeed(); });
+  feedRejects.addEventListener("click",()=>{ state.feedMode=FEED_MODE_REJECTS; updateKpis(); renderFeed(); });
   feedBlocks.addEventListener("click",()=>{ state.feedMode=FEED_MODE_BLOCKS; updateKpis(); renderFeed(); });
   feedPayouts.addEventListener("click",()=>{ state.feedMode=FEED_MODE_PAYOUTS; updateKpis(); renderFeed(); });
+  feedBanned.addEventListener("click",()=>{ state.feedMode=FEED_MODE_BANNED; updateKpis(); renderFeed(); });
   feedMinerOnly.addEventListener("click",()=>{ state.feedMinerOnly=!state.feedMinerOnly; updateKpis(); renderFeed(); });
   feedRows5.addEventListener("click",()=>{ state.feedRows=5; applyFeedRows(); saveUiPrefs(); updateKpis(); });
   feedRows10.addEventListener("click",()=>{ state.feedRows=10; applyFeedRows(); saveUiPrefs(); updateKpis(); });
@@ -2195,6 +2272,6 @@ count = -1  # -1 for max threads</div>
 <!-- =========================================================================
 File: pool_dashboard.html
 Location: snap-coin-pool/static/pool_dashboard.html
-Version: 1.7.1-pool-address.1
-Created: 2026-02-16T22:30:00Z
+Version: 1.7.2-feed-rejects-banned.1
+Created: 2026-02-17T00:00:00Z
 ========================================================================  -->
