@@ -1390,10 +1390,12 @@ count = -1  # -1 for max threads</div>
       const merged=[];
       const reUnified=snap.recent_events||snap.recentEvents||null;
       if(Array.isArray(reUnified)&&reUnified.length) for(const e of reUnified) merged.push(e);
-      const reShares=snap.recent_shares||snap.recentShares||null;
+      const reSharesAcc=snap.recent_shares_acc||snap.recentSharesAcc||null;
+      const reSharesRej=snap.recent_shares_rej||snap.recentSharesRej||null;
       const reBlocks=snap.recent_blocks||snap.recentBlocks||null;
       const rePayouts=snap.recent_payouts||snap.recentPayouts||null;
-      if(Array.isArray(reShares)&&reShares.length) for(const e of reShares) merged.push(e);
+      if(Array.isArray(reSharesAcc)&&reSharesAcc.length) for(const e of reSharesAcc) merged.push(e);
+      if(Array.isArray(reSharesRej)&&reSharesRej.length) for(const e of reSharesRej) merged.push(e);
       if(Array.isArray(reBlocks)&&reBlocks.length) for(const e of reBlocks) merged.push(e);
       if(Array.isArray(rePayouts)&&rePayouts.length) for(const e of rePayouts) merged.push(e);
 
