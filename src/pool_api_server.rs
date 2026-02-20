@@ -1,7 +1,7 @@
 // ============================================================================
 // File: pool_api_server.rs
 // Location: snap-coin-pool-v2/src/pool_api_server.rs
-// Version: 0.1.4-stats.18
+// Version: 0.1.4-stats.21
 //
 // Description:
 // Upstream pool API server (logic preserved) with OPTIONAL instrumentation hooks
@@ -39,17 +39,30 @@
 // - Do NOT create a node API client per incoming miner connection.
 //   Create a single shared Client once at server start and reuse via Arc.
 //
-// FIX (v0.1.4-stats.18):
-// - Resolve moved `block` compile error by capturing derived strings (hash) before move.
-// - Remove accidental second payout path call that would re-use moved `block` and
-//   could change payout behavior.
+// FIX (v0.1.4-stats.19):
+// - ADD: Emit MinerBanned via PoolEvent when an IP crosses the ban score threshold
+//   (add_penalty) or accumulates repeated watchdog kicks (record_kick_and_maybe_ban).
+// - ADD: Emit MinerKicked via PoolEvent on idle timeout and reject-streak watchdog kicks.
+// - FIX: Drop ip_scores mutex lock BEFORE awaiting emit calls (no await-while-locked).
+//
+// ADD (v0.1.4-stats.20):
+// - ADD: Emit MinerUnbanned via PoolEvent when score_decay_task clears `entry.banned`
+//   (score decays below BAN_THRESHOLD). Purely observational; no behavior changes.
+// - FIX: Ensure no await occurs while ip_scores mutex is held (collect then emit).
+//
+// FIX (v0.1.4-stats.21):
+// - FIX: Emit MinerConnected and MinerDisconnected unconditionally on every
+//   individual connection and disconnection event.
+// - REMOVE: All `by_ip == 1` guards that were suppressing telemetry events for
+//   miners with more than one concurrent connection from the same IP.
+//   The by_ip count is used only for connection limiting, not event filtering.
 // ============================================================================
 
 use anyhow::anyhow;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{RwLock, mpsc},
+    sync::{mpsc, RwLock},
     task::JoinHandle,
     time::timeout,
 };
@@ -72,7 +85,7 @@ use snap_coin::{
 use snap_coin::blockchain_data_provider::BlockchainDataProvider;
 
 use crate::{
-    handle_rewards::{PayoutMetrics, handle_rewards_with_metrics},
+    handle_rewards::{handle_rewards_with_metrics, PayoutMetrics},
     handle_share::handle_share,
     job_handler::JobHandler,
     share_store::SharedShareStore,
@@ -234,20 +247,37 @@ impl PoolServer {
     // ── Upstream ban logic (unchanged behavior) ────────────────────────────
 
     async fn add_penalty(&self, ip: String) {
-        let mut scores = self.ip_scores.lock().await;
-        let entry = scores.entry(ip.clone()).or_insert(IpScore {
-            score: 0,
-            banned: false,
-            kick_window_start_ts: 0,
-            kicks_in_window: 0,
-        });
+        // Collect result inside a block so the mutex guard drops before we await emit.
+        let newly_banned_score: Option<i32> = {
+            let mut scores = self.ip_scores.lock().await;
+            let entry = scores.entry(ip.clone()).or_insert(IpScore {
+                score: 0,
+                banned: false,
+                kick_window_start_ts: 0,
+                kicks_in_window: 0,
+            });
 
-        entry.score += ERROR_PENALTY;
+            entry.score += ERROR_PENALTY;
 
-        if entry.score >= BAN_THRESHOLD && !entry.banned {
-            entry.score += BAN_PENALTY;
-            entry.banned = true;
-            println!("IP {} has been BANNED (score: {})", ip, entry.score);
+            if entry.score >= BAN_THRESHOLD && !entry.banned {
+                entry.score += BAN_PENALTY;
+                entry.banned = true;
+                println!("IP {} has been BANNED (score: {})", ip, entry.score);
+                Some(entry.score)
+            } else {
+                None
+            }
+        }; // mutex released here
+
+        if let Some(score) = newly_banned_score {
+            self.emit(PoolEvent::MinerBanned {
+                ip,
+                miner: None,
+                score,
+                reason: "penalty threshold".to_string(),
+                timestamp: now_ts(),
+            })
+            .await;
         }
     }
 
@@ -258,51 +288,101 @@ impl PoolServer {
 
     async fn record_kick_and_maybe_ban(&self, ip: &str) -> bool {
         let now = now_ts();
-        let mut scores = self.ip_scores.lock().await;
-        let entry = scores.entry(ip.to_string()).or_insert(IpScore {
-            score: 0,
-            banned: false,
-            kick_window_start_ts: now,
-            kicks_in_window: 0,
-        });
 
-        if entry.kick_window_start_ts == 0
-            || now.saturating_sub(entry.kick_window_start_ts) > KICK_WINDOW_SECS
-        {
-            entry.kick_window_start_ts = now;
-            entry.kicks_in_window = 0;
+        // Collect result inside a block so the mutex guard drops before we await emit.
+        let (is_banned, newly_banned, score) = {
+            let mut scores = self.ip_scores.lock().await;
+            let entry = scores.entry(ip.to_string()).or_insert(IpScore {
+                score: 0,
+                banned: false,
+                kick_window_start_ts: now,
+                kicks_in_window: 0,
+            });
+
+            if entry.kick_window_start_ts == 0
+                || now.saturating_sub(entry.kick_window_start_ts) > KICK_WINDOW_SECS
+            {
+                entry.kick_window_start_ts = now;
+                entry.kicks_in_window = 0;
+            }
+
+            entry.kicks_in_window = entry.kicks_in_window.saturating_add(1);
+
+            if entry.kicks_in_window >= KICKS_TO_BAN && !entry.banned {
+                entry.score = BAN_THRESHOLD;
+                entry.banned = true;
+                println!(
+                    "IP {} has been BANNED due to repeated watchdog kicks (kicks_in_window: {})",
+                    ip, entry.kicks_in_window
+                );
+                (true, true, entry.score)
+            } else {
+                (entry.banned, false, entry.score)
+            }
+        }; // mutex released here
+
+        if newly_banned {
+            self.emit(PoolEvent::MinerBanned {
+                ip: ip.to_string(),
+                miner: None,
+                score,
+                reason: "repeated watchdog kicks".to_string(),
+                timestamp: now_ts(),
+            })
+            .await;
         }
 
-        entry.kicks_in_window = entry.kicks_in_window.saturating_add(1);
-
-        if entry.kicks_in_window >= KICKS_TO_BAN && !entry.banned {
-            entry.score = BAN_THRESHOLD;
-            entry.banned = true;
-            println!(
-                "IP {} has been BANNED due to repeated watchdog kicks (kicks_in_window: {})",
-                ip, entry.kicks_in_window
-            );
-            return true;
-        }
-
-        entry.banned
+        is_banned
     }
 
-    async fn score_decay_task(ip_scores: IpScoreMap) {
+    async fn score_decay_task(ip_scores: IpScoreMap, stats: Option<PoolEventSender>) {
         let mut interval = tokio::time::interval(SCORE_DECAY_INTERVAL);
         loop {
             interval.tick().await;
-            let mut scores = ip_scores.lock().await;
 
-            scores.retain(|_ip, entry| {
-                entry.score = (entry.score - SCORE_DECAY_AMOUNT).max(0);
+            // Collect unban transitions while holding the lock; emit after lock drop.
+            let mut unbanned: Vec<(String, i32)> = Vec::new();
 
-                if entry.banned && entry.score < BAN_THRESHOLD {
-                    entry.banned = false;
+            {
+                let mut scores = ip_scores.lock().await;
+
+                // Manual loop to preserve the prior semantics of:
+                // - score decays toward 0
+                // - banned flips false when score < BAN_THRESHOLD
+                // - entries removed when score == 0 and not banned
+                let mut remove_ips: Vec<String> = Vec::new();
+
+                for (ip, entry) in scores.iter_mut() {
+                    entry.score = (entry.score - SCORE_DECAY_AMOUNT).max(0);
+
+                    if entry.banned && entry.score < BAN_THRESHOLD {
+                        entry.banned = false;
+                        // Only emit on transition from banned -> unbanned.
+                        unbanned.push((ip.clone(), entry.score));
+                    }
+
+                    if entry.score == 0 && !entry.banned {
+                        remove_ips.push(ip.clone());
+                    }
                 }
 
-                entry.score > 0 || entry.banned
-            });
+                for ip in remove_ips {
+                    scores.remove(&ip);
+                }
+            } // mutex released here
+
+            if let Some(s) = stats.clone() {
+                for (ip, score) in unbanned {
+                    s.send(PoolEvent::MinerUnbanned {
+                        ip,
+                        miner: None,
+                        score,
+                        reason: "score decay below ban threshold".to_string(),
+                        timestamp: now_ts(),
+                    })
+                    .await;
+                }
+            }
         }
     }
 
@@ -321,14 +401,13 @@ impl PoolServer {
         let miner_key = format!("{:?}", client_address);
         let mut reject_streak: u32 = 0;
 
-        if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
-            self.emit(PoolEvent::MinerConnected {
-                miner: miner_key.clone(),
-                ip: ip.clone(),
-                timestamp: now_ts(),
-            })
-            .await;
-        }
+        // FIX v0.1.4-stats.21: emit MinerConnected unconditionally for every connection.
+        self.emit(PoolEvent::MinerConnected {
+            miner: miner_key.clone(),
+            ip: ip.clone(),
+            timestamp: now_ts(),
+        })
+        .await;
 
         loop {
             // Passive heartbeat: if no request arrives within HEARTBEAT_IDLE_SECS, drop connection.
@@ -343,6 +422,13 @@ impl PoolServer {
                         "Miner idle timeout ({}s) from {} miner={}",
                         HEARTBEAT_IDLE_SECS, ip, miner_key
                     );
+                    self.emit(PoolEvent::MinerKicked {
+                        ip: ip.clone(),
+                        miner: miner_key.clone(),
+                        reason: format!("idle timeout ({}s)", HEARTBEAT_IDLE_SECS),
+                        timestamp: now_ts(),
+                    })
+                    .await;
                     break;
                 }
                 Ok(Err(e)) => {
@@ -406,14 +492,26 @@ impl PoolServer {
 
                                     if reject_streak >= WATCHDOG_REJECT_STREAK_KICK {
                                         let was_banned = self.record_kick_and_maybe_ban(&ip).await;
-                                        if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
-                                            self.emit(PoolEvent::MinerDisconnected {
-                                                miner: miner_key.clone(),
-                                                ip: ip.clone(),
-                                                timestamp: now_ts(),
-                                            })
-                                            .await;
-                                        }
+
+                                        self.emit(PoolEvent::MinerKicked {
+                                            ip: ip.clone(),
+                                            miner: miner_key.clone(),
+                                            reason: format!(
+                                                "reject streak ({})",
+                                                WATCHDOG_REJECT_STREAK_KICK
+                                            ),
+                                            timestamp: now_ts(),
+                                        })
+                                        .await;
+
+                                        // FIX v0.1.4-stats.21: emit MinerDisconnected
+                                        // unconditionally on watchdog kick disconnect.
+                                        self.emit(PoolEvent::MinerDisconnected {
+                                            miner: miner_key.clone(),
+                                            ip: ip.clone(),
+                                            timestamp: now_ts(),
+                                        })
+                                        .await;
 
                                         let _ = stream.shutdown().await;
 
@@ -483,28 +581,27 @@ impl PoolServer {
                 println!("Miner error from {} miner={}: {}", ip, miner_key, e);
                 self.add_penalty(ip.clone()).await;
 
-                if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
-                    self.emit(PoolEvent::MinerDisconnected {
-                        miner: miner_key.clone(),
-                        ip: ip.clone(),
-                        timestamp: now_ts(),
-                    })
-                    .await;
-                }
+                // FIX v0.1.4-stats.21: emit MinerDisconnected unconditionally on error exit.
+                self.emit(PoolEvent::MinerDisconnected {
+                    miner: miner_key.clone(),
+                    ip: ip.clone(),
+                    timestamp: now_ts(),
+                })
+                .await;
 
                 break;
             }
         }
 
         self.unregister_connection(&miner_key, &ip).await;
-        if self.active.lock().await.by_ip.get(&ip).unwrap_or(&1) == &1 {
-            self.emit(PoolEvent::MinerDisconnected {
-                miner: miner_key,
-                ip,
-                timestamp: now_ts(),
-            })
-            .await;
-        }
+
+        // FIX v0.1.4-stats.21: emit MinerDisconnected unconditionally on clean loop exit.
+        self.emit(PoolEvent::MinerDisconnected {
+            miner: miner_key,
+            ip,
+            timestamp: now_ts(),
+        })
+        .await;
     }
 
     // ── Listen (logic preserved; telemetry added) ──────────────────────────
@@ -520,8 +617,9 @@ impl PoolServer {
         );
 
         let ip_scores_clone = self.ip_scores.clone();
+        let stats_clone = self.stats.clone();
         tokio::spawn(async move {
-            Self::score_decay_task(ip_scores_clone).await;
+            Self::score_decay_task(ip_scores_clone, stats_clone).await;
         });
 
         // v0.1.4-stats.17: shared node API client (used for per-miner height telemetry)
@@ -737,9 +835,8 @@ fn now_ts() -> u64 {
 // ============================================================================
 // File: pool_api_server.rs
 // Location: snap-coin-pool-v2/src/pool_api_server.rs
-// Version: 0.1.4-stats.18
-// Updated: 2026-02-16
+// Version: 0.1.4-stats.21
+// Updated: 2026-02-17
 // ============================================================================
-// Generated: 2026-02-16T00:00:00Z
-// LOC: (not auto-counted)
+// Generated: 2026-02-17T00:00:00Z
 // ============================================================================

@@ -1,7 +1,21 @@
 // ============================================================================
 // File: pool_stats_server.rs
 // Location: snap-coin-pool-v2/src/pool_stats_server.rs
-// Version: 1.4.5-hashrate-fix.1
+// Version: 1.4.8-six-buffer-compat.1
+//
+// CHANGELOG (v1.4.8-six-buffer-compat.1):
+//   - FIX: Update hashrate sampling logic to use PoolSnapshot.recent_shares_acc
+//          (six-buffer PoolState) instead of removed recent_shares field.
+//   - No other behavior changes.
+//
+// CHANGELOG (v1.4.7-ban-unban-events.1):
+//   - ADD: MinerUnbanned event variant (ip, miner: Option<String>, score, reason, timestamp).
+//
+// CHANGELOG (v1.4.6-ban-kick-events.1):
+//   - ADD: MinerBanned event variant (ip, miner: Option<String>, score, reason, timestamp).
+//   - ADD: MinerKicked event variant (ip, miner, reason, timestamp).
+//   - Both variants flow through WS broadcast + poolstate recent_shares buffer
+//     automatically via existing serde tag routing and catch-all match arms.
 //
 // Description: WebSocket stats server for real-time pool monitoring dashboard.
 //              Broadcasts pool events (miner connections, shares, blocks, payouts,
@@ -180,6 +194,40 @@ pub enum PoolEvent {
         avg_block_time_secs: u64,
         timestamp: u64,
     },
+
+    /// Emitted when an IP crosses the ban score threshold (penalty-based)
+    /// or accumulates too many watchdog kicks within the kick window.
+    /// `miner` is None when the ban occurs before/outside a miner session
+    /// (e.g. handshake-stage penalty accumulation).
+    MinerBanned {
+        ip: String,
+        #[serde(default)]
+        miner: Option<String>,
+        score: i32,
+        reason: String,
+        timestamp: u64,
+    },
+
+    /// Emitted when a previously banned IP becomes unbanned
+    /// (e.g., score decay drops below BAN_THRESHOLD).
+    /// `miner` is None when the unban occurs outside a miner session.
+    MinerUnbanned {
+        ip: String,
+        #[serde(default)]
+        miner: Option<String>,
+        score: i32,
+        reason: String,
+        timestamp: u64,
+    },
+
+    /// Emitted when a miner session is forcibly terminated by the pool watchdog
+    /// (idle timeout or reject streak), before the eventual MinerDisconnected.
+    MinerKicked {
+        ip: String,
+        miner: String,
+        reason: String,
+        timestamp: u64,
+    },
 }
 
 // ── Event sender ───────────────────────────────────────────────────────────
@@ -227,10 +275,7 @@ impl PoolStatsServer {
             pool_state: pool_state.clone(),
         };
 
-        let sender = PoolEventSender {
-            tx,
-            pool_state,
-        };
+        let sender = PoolEventSender { tx, pool_state };
 
         (server, sender)
     }
@@ -526,9 +571,9 @@ fn spawn_network_stats_tasks(event_tx: broadcast::Sender<PoolEvent>, pool_state:
             if last_pool_sample_ts == 0 || now.saturating_sub(last_pool_sample_ts) >= 15 {
                 let snap = pool_state.snapshot().await;
 
-                // Find most recent ShareAccepted timestamp from recent_shares (best-effort).
+                // Find most recent ShareAccepted timestamp from recent_shares_acc (best-effort).
                 let mut last_share_ts: u64 = 0;
-                for e in snap.recent_shares.iter().rev() {
+                for e in snap.recent_shares_acc.iter().rev() {
                     if let PoolEvent::ShareAccepted { timestamp, .. } = e {
                         last_share_ts = *timestamp;
                         break;
@@ -553,7 +598,7 @@ fn spawn_network_stats_tasks(event_tx: broadcast::Sender<PoolEvent>, pool_state:
                     let pool_diff = snap.pool_difficulty_fixed_num.max(1);
 
                     let mut work_units_sum: u64 = 0;
-                    for e in snap.recent_shares.iter().rev() {
+                    for e in snap.recent_shares_acc.iter().rev() {
                         if let PoolEvent::ShareAccepted {
                             work_units,
                             timestamp,
@@ -623,6 +668,6 @@ fn now_ts() -> u64 {
 // ============================================================================
 // File: pool_stats_server.rs
 // Location: snap-coin-pool-v2/src/pool_stats_server.rs
-// Version: 1.4.5-hashrate-fix.1
-// Created: 2026-02-15T20:30:00Z
+// Version: 1.4.8-six-buffer-compat.1
+// Created: 2026-02-17T00:00:00Z
 // ============================================================================
